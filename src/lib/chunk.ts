@@ -1,4 +1,4 @@
-const TARGET_LEN = 200;
+const TARGET_LEN = 201;
 const MAX_LEN = 280;
 
 const SENTENCE_RE = /[^.!?\n]+(?:[.!?]+["')\]]*|\n+|$)/g;
