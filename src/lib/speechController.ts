@@ -5,6 +5,10 @@ interface SpeechControllerCallbacks {
   onStatusChange: (status: PlaybackStatus) => void;
 }
 
+function getSynth(): SpeechSynthesis | undefined {
+  return typeof window !== "undefined" ? window.speechSynthesis : undefined;
+}
+
 /**
  * Speaks a list of text chunks one at a time via window.speechSynthesis.
  *
@@ -18,6 +22,10 @@ interface SpeechControllerCallbacks {
  * onerror) check their own sequence against the controller's current one and
  * no-op if it has moved on — this is what lets us tell a genuine completion
  * apart from an event arriving for an utterance we already canceled.
+ *
+ * All entry points guard against speechSynthesis/SpeechSynthesisUtterance
+ * being missing or partially implemented, since that varies across
+ * WebKit/iOS builds — a missing API degrades to a no-op instead of throwing.
  */
 export class SpeechController {
   private chunks: string[] = [];
@@ -30,6 +38,10 @@ export class SpeechController {
 
   constructor(callbacks: SpeechControllerCallbacks) {
     this.callbacks = callbacks;
+  }
+
+  static isSupported(): boolean {
+    return typeof window !== "undefined" && !!window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function";
   }
 
   setChunks(chunks: string[], startIndex = 0) {
@@ -57,7 +69,7 @@ export class SpeechController {
   }
 
   play() {
-    if (this.chunks.length === 0) return;
+    if (this.chunks.length === 0 || !SpeechController.isSupported()) return;
     if (this.index >= this.chunks.length) this.index = 0;
     this.speakFrom(this.index);
   }
@@ -65,13 +77,13 @@ export class SpeechController {
   pause() {
     if (this.status !== "playing") return;
     this.sequence += 1;
-    window.speechSynthesis.cancel();
+    getSynth()?.cancel();
     this.setStatus("paused");
   }
 
   stop() {
     this.sequence += 1;
-    window.speechSynthesis.cancel();
+    getSynth()?.cancel();
     this.index = 0;
     this.setStatus("idle");
     this.callbacks.onIndexChange(this.index);
@@ -81,7 +93,7 @@ export class SpeechController {
     const wasPlaying = this.status === "playing";
     if (wasPlaying) {
       this.sequence += 1;
-      window.speechSynthesis.cancel();
+      getSynth()?.cancel();
     }
     this.index = Math.min(Math.max(this.index + delta, 0), Math.max(this.chunks.length - 1, 0));
     this.callbacks.onIndexChange(this.index);
@@ -98,7 +110,8 @@ export class SpeechController {
   }
 
   private speakFrom(index: number) {
-    if (index < 0 || index >= this.chunks.length) {
+    const synth = getSynth();
+    if (!synth || !SpeechController.isSupported() || index < 0 || index >= this.chunks.length) {
       this.setStatus("idle");
       return;
     }
@@ -108,10 +121,6 @@ export class SpeechController {
 
     this.sequence += 1;
     const seq = this.sequence;
-
-    const utterance = new SpeechSynthesisUtterance(this.chunks[index]);
-    utterance.rate = this.rate;
-    if (this.voice) utterance.voice = this.voice;
 
     const advance = () => {
       if (seq !== this.sequence) return; // superseded by a cancel/pause/skip
@@ -123,9 +132,15 @@ export class SpeechController {
       }
     };
 
-    utterance.onend = advance;
-    utterance.onerror = advance;
-
-    window.speechSynthesis.speak(utterance);
+    try {
+      const utterance = new SpeechSynthesisUtterance(this.chunks[index]);
+      utterance.rate = this.rate;
+      if (this.voice) utterance.voice = this.voice;
+      utterance.onend = advance;
+      utterance.onerror = advance;
+      synth.speak(utterance);
+    } catch {
+      this.setStatus("idle");
+    }
   }
 }

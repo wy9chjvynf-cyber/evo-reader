@@ -7,6 +7,11 @@ const base = process.env.GH_PAGES ? "/evo-reader/" : "/";
 
 export default defineConfig({
   base,
+  // Conservative baseline so esbuild transpiles any newer syntax that
+  // older/partial iOS WebKit builds don't support, instead of shipping it as-is.
+  build: {
+    target: ["es2020", "safari14"],
+  },
   plugins: [
     react(),
     VitePWA({

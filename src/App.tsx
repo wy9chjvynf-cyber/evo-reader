@@ -29,6 +29,7 @@ export default function App() {
 
   const voices = useVoices();
   const autoPickedVoice = useRef(false);
+  const [ttsSupported] = useState(() => SpeechController.isSupported());
   const [controller] = useState(
     () =>
       new SpeechController({
@@ -155,6 +156,7 @@ export default function App() {
           onVoiceChange={setVoiceURI}
           onFileChange={handleFileChange}
           controller={controller}
+          ttsSupported={ttsSupported}
         />
       )}
     </div>
@@ -174,6 +176,7 @@ interface ReaderProps {
   onVoiceChange: (voiceURI: string) => void;
   onFileChange: (e: ChangeEvent<HTMLInputElement>) => void;
   controller: SpeechController;
+  ttsSupported: boolean;
 }
 
 function Reader({
@@ -189,6 +192,7 @@ function Reader({
   onVoiceChange,
   onFileChange,
   controller,
+  ttsSupported,
 }: ReaderProps) {
   const total = book.chunks.length;
   const progress = total > 1 ? Math.round((index / (total - 1)) * 100) : 0;
@@ -199,6 +203,10 @@ function Reader({
       <h2 className="title">{book.title}</h2>
 
       <div className="current-text">{currentText}</div>
+
+      {!ttsSupported && (
+        <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
+      )}
 
       <div className="transport">
         <button
@@ -214,6 +222,7 @@ function Reader({
           className="play-button"
           aria-label={status === "playing" ? "Pausar" : "Reproducir"}
           onClick={() => (status === "playing" ? controller.pause() : controller.play())}
+          disabled={!ttsSupported}
         >
           {status === "playing" ? "⏸" : "▶"}
         </button>

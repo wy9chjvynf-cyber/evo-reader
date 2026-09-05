@@ -20,15 +20,32 @@ export interface StoredSettings {
 
 export const DEFAULT_SETTINGS: StoredSettings = { rate: 1, voiceURI: null };
 
-export const saveBook = (book: StoredBook) => set(BOOK_KEY, book);
-export const loadBook = () => get<StoredBook>(BOOK_KEY);
-export const clearBook = async () => {
-  await del(BOOK_KEY);
-  await del(PROGRESS_KEY);
-};
+/**
+ * idb-keyval calls indexedDB.open() synchronously the moment get()/set() is
+ * invoked. On some iOS/WebKit builds (private browsing, restricted profiles,
+ * older engine versions) indexedDB is present but not fully functional, so
+ * that call can throw synchronously instead of rejecting a promise. Routing
+ * every storage call through here means a broken IndexedDB degrades to
+ * "nothing was saved" instead of crashing app init.
+ */
+async function safely<T>(op: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await op();
+  } catch {
+    return undefined;
+  }
+}
 
-export const saveProgress = (progress: StoredProgress) => set(PROGRESS_KEY, progress);
-export const loadProgress = () => get<StoredProgress>(PROGRESS_KEY);
+export const saveBook = (book: StoredBook) => safely(() => set(BOOK_KEY, book));
+export const loadBook = () => safely(() => get<StoredBook>(BOOK_KEY));
+export const clearBook = () =>
+  safely(async () => {
+    await del(BOOK_KEY);
+    await del(PROGRESS_KEY);
+  });
 
-export const saveSettings = (settings: StoredSettings) => set(SETTINGS_KEY, settings);
-export const loadSettings = () => get<StoredSettings>(SETTINGS_KEY);
+export const saveProgress = (progress: StoredProgress) => safely(() => set(PROGRESS_KEY, progress));
+export const loadProgress = () => safely(() => get<StoredProgress>(PROGRESS_KEY));
+
+export const saveSettings = (settings: StoredSettings) => safely(() => set(SETTINGS_KEY, settings));
+export const loadSettings = () => safely(() => get<StoredSettings>(SETTINGS_KEY));
