@@ -21,7 +21,8 @@ npm run build
 ## Deploy (GitHub Pages)
 
 ```bash
-GH_PAGES=1 npm run build
+npm run deploy
 ```
 
-genera `dist/` con el `base` correcto para servirse desde `https://<usuario>.github.io/evo-reader/`.
+Compila con el `base` correcto, publica `dist/` en la rama `gh-pages` y queda disponible en
+`https://<usuario>.github.io/evo-reader/`.
