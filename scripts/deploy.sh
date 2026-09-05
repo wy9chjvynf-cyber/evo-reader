@@ -18,7 +18,9 @@ cp -R dist/. "$worktree"/
 
 git -C "$worktree" add -A
 git -C "$worktree" commit -m "Deploy EvoReader build to GitHub Pages" --quiet || echo "Nada nuevo que desplegar."
-git -C "$worktree" push origin gh-pages
+# gh-pages holds only the built output (one throwaway commit per deploy, no
+# history worth keeping), so force-pushing it is expected here.
+git -C "$worktree" push origin gh-pages --force
 
 git worktree remove "$worktree" --force
 
