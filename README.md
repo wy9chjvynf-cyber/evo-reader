@@ -15,8 +15,19 @@ npm run dev
 
 ```bash
 npm run lint
+npm run test
 npm run build
 ```
+
+## Arquitectura del Reader Core
+
+Los libros se procesan e importan de forma incremental (página a página para PDF) y se
+guardan en IndexedDB con un modelo normalizado (`books` / `sections` / `chunks`) en vez de un
+único blob con todo el texto — ver `src/lib/db.ts`, `src/lib/pdfImport.ts` y
+`src/lib/bookImport.ts`. Esto permite libros muy grandes sin mantener todo el texto en memoria,
+reanudar una importación interrumpida, y empezar a narrar antes de que termine de importarse
+todo el libro. `scripts/gen-test-pdf.mjs <páginas> <ruta>` genera PDFs de prueba de cualquier
+tamaño para probar esto localmente.
 
 ## Deploy (GitHub Pages)
 

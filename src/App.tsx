@@ -1,68 +1,106 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { splitIntoChunks } from "./lib/chunk";
+import { beginImport, beginResume, type ImportProgressInfo } from "./lib/bookImport";
+import { getActiveBook, getChunk, getMeta, putMeta, updateBook, type BookRecord } from "./lib/db";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
-import {
-  DEFAULT_SETTINGS,
-  loadBook,
-  loadProgress,
-  loadSettings,
-  saveBook,
-  saveProgress,
-  saveSettings,
-  type StoredBook,
-} from "./lib/storage";
-import { extractText, titleFromFilename } from "./lib/textExtract";
 import { useVoices } from "./lib/useVoices";
 
 const MIN_RATE = 0.75;
 const MAX_RATE = 2;
 
+interface LastSettings {
+  rate: number;
+  voiceURI: string | null;
+}
+
 export default function App() {
-  const [book, setBook] = useState<StoredBook | null>(null);
+  const [book, setBook] = useState<BookRecord | null>(null);
+  const [currentText, setCurrentText] = useState("");
   const [index, setIndex] = useState(0);
   const [status, setStatus] = useState<PlaybackStatus>("idle");
-  const [rate, setRate] = useState(DEFAULT_SETTINGS.rate);
-  const [voiceURI, setVoiceURI] = useState<string | null>(DEFAULT_SETTINGS.voiceURI);
-  const [loading, setLoading] = useState(false);
+  const [rate, setRate] = useState(1);
+  const [voiceURI, setVoiceURI] = useState<string | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgressInfo | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
 
   const voices = useVoices();
   const autoPickedVoice = useRef(false);
+  const bookIdRef = useRef<string | null>(null);
   const [ttsSupported] = useState(() => SpeechController.isSupported());
   const [controller] = useState(
     () =>
       new SpeechController({
         onIndexChange: (i) => {
           setIndex(i);
-          void saveProgress({ index: i });
+          if (bookIdRef.current) void updateBook(bookIdRef.current, { currentChunk: i });
         },
         onStatusChange: (s) => setStatus(s),
+        onChunkText: (text) => setCurrentText(text ?? ""),
+        getChunkText: async (i) => {
+          if (!bookIdRef.current) return undefined;
+          const chunk = await getChunk(bookIdRef.current, i);
+          return chunk?.text;
+        },
       }),
   );
 
-  // Restore book + progress + settings on first load.
+  const applyBook = useCallback(
+    (b: BookRecord) => {
+      bookIdRef.current = b.id;
+      setBook(b);
+    },
+    [],
+  );
+
+  // Restore (or resume importing) the active book, and last-used settings, on first load.
   useEffect(() => {
     (async () => {
-      const [storedBook, storedProgress, storedSettings] = await Promise.all([
-        loadBook(),
-        loadProgress(),
-        loadSettings(),
-      ]);
-      if (storedSettings) {
-        setRate(storedSettings.rate);
-        setVoiceURI(storedSettings.voiceURI);
-        if (storedSettings.voiceURI) autoPickedVoice.current = true;
+      const [existingBook, lastSettings] = await Promise.all([getActiveBook(), getMeta<LastSettings>("lastSettings")]);
+
+      if (existingBook) {
+        applyBook(existingBook);
+        setRate(existingBook.rate);
+        setVoiceURI(existingBook.voiceURI);
+        if (existingBook.voiceURI) autoPickedVoice.current = true;
+        controller.setBook(existingBook.totalChunks, existingBook.currentChunk);
+
+        if (existingBook.importStatus === "importing") {
+          setImportProgress({
+            page: existingBook.importedUntil,
+            totalPages: existingBook.totalPages,
+            chunksSoFar: existingBook.totalChunks,
+            percent:
+              existingBook.totalPages && existingBook.totalPages > 0
+                ? Math.round((existingBook.importedUntil / existingBook.totalPages) * 100)
+                : null,
+          });
+          beginResume(existingBook, {
+            onProgress: (b, p) => {
+              applyBook(b);
+              controller.setTotalChunks(b.totalChunks);
+              setImportProgress(p);
+            },
+            onDone: (b) => {
+              applyBook(b);
+              controller.setTotalChunks(b.totalChunks);
+              setImportProgress(null);
+            },
+            onError: (message) => {
+              setError(message);
+              setImportProgress(null);
+            },
+          });
+        }
+      } else if (lastSettings) {
+        setRate(lastSettings.rate);
+        setVoiceURI(lastSettings.voiceURI);
+        if (lastSettings.voiceURI) autoPickedVoice.current = true;
       }
-      if (storedBook) {
-        setBook(storedBook);
-        const startIndex = storedProgress?.index ?? 0;
-        setIndex(startIndex);
-        controller.setChunks(storedBook.chunks, startIndex);
-      }
+
       setReady(true);
     })();
-  }, [controller]);
+  }, [applyBook, controller]);
 
   // Default to a Spanish voice once voices are available, unless the user already chose one.
   useEffect(() => {
@@ -85,34 +123,45 @@ export default function App() {
 
   useEffect(() => {
     if (!ready) return;
-    void saveSettings({ rate, voiceURI });
+    void putMeta("lastSettings", { rate, voiceURI });
+    if (bookIdRef.current) void updateBook(bookIdRef.current, { rate, voiceURI });
   }, [ready, rate, voiceURI]);
 
-  const handleFileChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const handleFileChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
 
-    setLoading(true);
-    setError(null);
-    try {
-      const text = await extractText(file);
-      const chunks = splitIntoChunks(text);
-      if (chunks.length === 0) {
-        throw new Error("No se pudo extraer texto de este archivo.");
-      }
-      const title = titleFromFilename(file.name);
-      const newBook: StoredBook = { title, chunks };
-      await saveBook(newBook);
-      await saveProgress({ index: 0 });
-      setBook(newBook);
-      controller.setChunks(chunks, 0);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Error al leer el archivo.");
-    } finally {
-      setLoading(false);
-    }
-  }, [controller]);
+      setError(null);
+      setBusy(true);
+      setImportProgress({ page: 0, totalPages: null, chunksSoFar: 0, percent: null });
+
+      beginImport(file, {
+        onCreated: (b) => {
+          applyBook(b);
+          controller.setBook(0, 0);
+          setBusy(false);
+        },
+        onProgress: (b, p) => {
+          applyBook(b);
+          controller.setTotalChunks(b.totalChunks);
+          setImportProgress(p);
+        },
+        onDone: (b) => {
+          applyBook(b);
+          controller.setTotalChunks(b.totalChunks);
+          setImportProgress(null);
+        },
+        onError: (message) => {
+          setError(message);
+          setBusy(false);
+          setImportProgress(null);
+        },
+      });
+    },
+    [applyBook, controller],
+  );
 
   if (!ready) {
     return (
@@ -129,14 +178,8 @@ export default function App() {
       {!book && (
         <div className="empty-state">
           <label className="load-button">
-            {loading ? "Cargando…" : "Cargar libro"}
-            <input
-              type="file"
-              accept=".pdf,.txt,.docx"
-              onChange={handleFileChange}
-              disabled={loading}
-              hidden
-            />
+            {busy ? "Cargando…" : "Cargar libro"}
+            <input type="file" accept=".pdf,.txt,.docx" onChange={handleFileChange} disabled={busy} hidden />
           </label>
           {error && <p className="error">{error}</p>}
         </div>
@@ -146,11 +189,13 @@ export default function App() {
         <Reader
           book={book}
           index={index}
+          currentText={currentText}
           status={status}
           rate={rate}
           voiceURI={voiceURI}
           voices={voices}
-          loading={loading}
+          importProgress={importProgress}
+          busy={busy}
           error={error}
           onRateChange={setRate}
           onVoiceChange={setVoiceURI}
@@ -164,13 +209,15 @@ export default function App() {
 }
 
 interface ReaderProps {
-  book: StoredBook;
+  book: BookRecord;
   index: number;
+  currentText: string;
   status: PlaybackStatus;
   rate: number;
   voiceURI: string | null;
   voices: SpeechSynthesisVoice[];
-  loading: boolean;
+  importProgress: ImportProgressInfo | null;
+  busy: boolean;
   error: string | null;
   onRateChange: (rate: number) => void;
   onVoiceChange: (voiceURI: string) => void;
@@ -182,11 +229,13 @@ interface ReaderProps {
 function Reader({
   book,
   index,
+  currentText,
   status,
   rate,
   voiceURI,
   voices,
-  loading,
+  importProgress,
+  busy,
   error,
   onRateChange,
   onVoiceChange,
@@ -194,15 +243,32 @@ function Reader({
   controller,
   ttsSupported,
 }: ReaderProps) {
-  const total = book.chunks.length;
+  const total = book.totalChunks;
   const progress = total > 1 ? Math.round((index / (total - 1)) * 100) : 0;
-  const currentText = book.chunks[index] ?? "";
+  const importing = book.importStatus === "importing";
 
   return (
     <div className="reader">
       <h2 className="title">{book.title}</h2>
 
-      <div className="current-text">{currentText}</div>
+      {importProgress && (
+        <div className="import-progress">
+          <p className="import-progress-label">
+            Procesando libro…{" "}
+            {importProgress.totalPages ? `Página ${importProgress.page} de ${importProgress.totalPages}` : ""}
+            {importProgress.percent !== null ? ` · ${importProgress.percent}%` : ""}
+          </p>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${importProgress.percent ?? 0}%` }} />
+          </div>
+        </div>
+      )}
+
+      <div className="current-text">
+        {currentText || (importing ? "Preparando el texto…" : "")}
+      </div>
+
+      {status === "buffering" && <p className="notice">Cargando…</p>}
 
       {!ttsSupported && (
         <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
@@ -221,10 +287,10 @@ function Reader({
         <button
           className="play-button"
           aria-label={status === "playing" ? "Pausar" : "Reproducir"}
-          onClick={() => (status === "playing" ? controller.pause() : controller.play())}
-          disabled={!ttsSupported}
+          onClick={() => (status === "playing" || status === "buffering" ? controller.pause() : controller.play())}
+          disabled={!ttsSupported || total === 0}
         >
-          {status === "playing" ? "⏸" : "▶"}
+          {status === "playing" || status === "buffering" ? "⏸" : "▶"}
         </button>
 
         <button
@@ -277,14 +343,8 @@ function Reader({
       {error && <p className="error">{error}</p>}
 
       <label className="load-button secondary">
-        {loading ? "Cargando…" : "Cargar otro libro"}
-        <input
-          type="file"
-          accept=".pdf,.txt,.docx"
-          onChange={onFileChange}
-          disabled={loading}
-          hidden
-        />
+        {busy ? "Cargando…" : "Cargar otro libro"}
+        <input type="file" accept=".pdf,.txt,.docx" onChange={onFileChange} disabled={busy || importing} hidden />
       </label>
     </div>
   );

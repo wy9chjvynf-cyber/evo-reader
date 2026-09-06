@@ -233,6 +233,20 @@ select {
   margin: -8px 0 0;
 }
 
+.import-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.import-progress-label {
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: center;
+  margin: 0;
+}
+
 .text-link {
   background: none;
   border: none;

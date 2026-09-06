@@ -1,55 +1,77 @@
-export type PlaybackStatus = "idle" | "playing" | "paused";
+export type PlaybackStatus = "idle" | "playing" | "paused" | "buffering";
 
-interface SpeechControllerCallbacks {
+interface SpeechControllerDeps {
   onIndexChange: (index: number) => void;
   onStatusChange: (status: PlaybackStatus) => void;
+  /** Called whenever the text for the current index is resolved, for display. */
+  onChunkText: (text: string | undefined) => void;
+  /** Fetches one chunk's text from wherever it's stored; undefined = not persisted (yet). */
+  getChunkText: (index: number) => Promise<string | undefined>;
 }
 
 function getSynth(): SpeechSynthesis | undefined {
   return typeof window !== "undefined" ? window.speechSynthesis : undefined;
 }
 
+const CACHE_WINDOW = 6;
+const MAX_BUFFER_RETRIES = 25;
+const BUFFER_RETRY_MS = 400;
+
 /**
- * Speaks a list of text chunks one at a time via window.speechSynthesis.
+ * Speaks a book's chunks one at a time via window.speechSynthesis, fetching
+ * each chunk's text on demand (plus a small one-ahead prefetch) instead of
+ * holding the whole book's text in memory — a book can have tens of
+ * thousands of chunks, and PDF import can still be filling in later ones
+ * while narration is already underway.
+ *
+ * "buffering" status covers both waiting for the next chunk to actually
+ * exist yet (import still catching up — this is what lets Play start before
+ * a big PDF finishes importing) and the brief moment any chunk fetch takes.
+ * If a chunk never shows up after MAX_BUFFER_RETRIES, that's treated as the
+ * real end of the book.
  *
  * Pause/resume is implemented as cancel + re-speak-from-index rather than the
  * native pause()/resume(), because native pause/resume is unreliable on
- * mobile Safari/Chrome (utterances can get silently stuck). The cost is that
- * resuming restarts the current sentence instead of the exact word, which is
- * an acceptable tradeoff for reliability.
- *
- * Each speak() call is tagged with a sequence number. Callbacks (onend,
- * onerror) check their own sequence against the controller's current one and
- * no-op if it has moved on — this is what lets us tell a genuine completion
- * apart from an event arriving for an utterance we already canceled.
- *
- * All entry points guard against speechSynthesis/SpeechSynthesisUtterance
- * being missing or partially implemented, since that varies across
- * WebKit/iOS builds — a missing API degrades to a no-op instead of throwing.
+ * mobile Safari/Chrome (utterances can get silently stuck). Each speak()
+ * call is tagged with a sequence number so a stale event from a canceled
+ * utterance can't be mistaken for a genuine completion.
  */
 export class SpeechController {
-  private chunks: string[] = [];
+  private totalChunks = 0;
   private index = 0;
   private rate = 1;
   private voice: SpeechSynthesisVoice | null = null;
   private status: PlaybackStatus = "idle";
   private sequence = 0;
-  private callbacks: SpeechControllerCallbacks;
+  private cache = new Map<number, string>();
+  private deps: SpeechControllerDeps;
 
-  constructor(callbacks: SpeechControllerCallbacks) {
-    this.callbacks = callbacks;
+  constructor(deps: SpeechControllerDeps) {
+    this.deps = deps;
   }
 
   static isSupported(): boolean {
     return typeof window !== "undefined" && !!window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function";
   }
 
-  setChunks(chunks: string[], startIndex = 0) {
-    this.stop();
-    this.chunks = chunks;
-    this.index = Math.min(Math.max(startIndex, 0), Math.max(chunks.length - 1, 0));
+  /** Loads a (possibly still-importing) book: totalChunks is the best-known count so far. */
+  setBook(totalChunks: number, startIndex = 0) {
+    this.sequence += 1;
+    getSynth()?.cancel();
+    this.totalChunks = totalChunks;
+    this.cache.clear();
+    this.index = Math.min(Math.max(startIndex, 0), Math.max(totalChunks - 1, 0));
     this.setStatus("idle");
-    this.callbacks.onIndexChange(this.index);
+    this.deps.onIndexChange(this.index);
+    void this.showCurrent();
+  }
+
+  /** Called as import progresses, so skip()/play() bounds and the progress bar stay current. */
+  setTotalChunks(totalChunks: number) {
+    this.totalChunks = totalChunks;
+    // The current index's text may have just become available (e.g. import
+    // finished while the user hadn't pressed Play yet) — refresh the display.
+    if (this.status === "idle") void this.showCurrent();
   }
 
   setRate(rate: number) {
@@ -69,13 +91,13 @@ export class SpeechController {
   }
 
   play() {
-    if (this.chunks.length === 0 || !SpeechController.isSupported()) return;
-    if (this.index >= this.chunks.length) this.index = 0;
-    this.speakFrom(this.index);
+    if (!SpeechController.isSupported()) return;
+    if (this.totalChunks > 0 && this.index >= this.totalChunks) this.index = 0;
+    void this.speakFrom(this.index);
   }
 
   pause() {
-    if (this.status !== "playing") return;
+    if (this.status !== "playing" && this.status !== "buffering") return;
     this.sequence += 1;
     getSynth()?.cancel();
     this.setStatus("paused");
@@ -86,56 +108,95 @@ export class SpeechController {
     getSynth()?.cancel();
     this.index = 0;
     this.setStatus("idle");
-    this.callbacks.onIndexChange(this.index);
+    this.deps.onIndexChange(0);
+    void this.showCurrent();
   }
 
   skip(delta: number) {
-    const wasPlaying = this.status === "playing";
-    if (wasPlaying) {
+    const wasActive = this.status === "playing" || this.status === "buffering";
+    if (wasActive) {
       this.sequence += 1;
       getSynth()?.cancel();
     }
-    this.index = Math.min(Math.max(this.index + delta, 0), Math.max(this.chunks.length - 1, 0));
-    this.callbacks.onIndexChange(this.index);
-    if (wasPlaying) {
-      this.speakFrom(this.index);
+    const max = Math.max(this.totalChunks - 1, 0);
+    this.index = Math.min(Math.max(this.index + delta, 0), max);
+    this.deps.onIndexChange(this.index);
+    if (wasActive) {
+      void this.speakFrom(this.index);
     } else {
       this.setStatus("paused");
+      void this.showCurrent();
     }
   }
 
   private setStatus(status: PlaybackStatus) {
     this.status = status;
-    this.callbacks.onStatusChange(status);
+    this.deps.onStatusChange(status);
   }
 
-  private speakFrom(index: number) {
-    const synth = getSynth();
-    if (!synth || !SpeechController.isSupported() || index < 0 || index >= this.chunks.length) {
-      this.setStatus("idle");
-      return;
+  private async getChunkCached(index: number): Promise<string | undefined> {
+    const cached = this.cache.get(index);
+    if (cached !== undefined) return cached;
+    const text = await this.deps.getChunkText(index);
+    if (text !== undefined) {
+      this.cache.set(index, text);
+      if (this.cache.size > CACHE_WINDOW) {
+        const oldest = [...this.cache.keys()].sort((a, b) => a - b)[0];
+        this.cache.delete(oldest);
+      }
     }
+    return text;
+  }
+
+  /** Fetches and reports the text for the current index without speaking (idle/paused display). */
+  private async showCurrent() {
+    const idx = this.index;
+    const text = await this.getChunkCached(idx);
+    if (this.index !== idx) return; // moved on meanwhile
+    this.deps.onChunkText(text);
+  }
+
+  private async speakFrom(index: number, attempt = 0) {
     this.index = index;
-    this.callbacks.onIndexChange(index);
-    this.setStatus("playing");
+    this.deps.onIndexChange(index);
 
     this.sequence += 1;
     const seq = this.sequence;
 
-    const advance = () => {
-      if (seq !== this.sequence) return; // superseded by a cancel/pause/skip
-      const next = index + 1;
-      if (next >= this.chunks.length) {
-        this.stop();
-      } else {
-        this.speakFrom(next);
-      }
-    };
+    this.setStatus("buffering");
+    const text = await this.getChunkCached(index);
+    if (seq !== this.sequence) return; // superseded by a cancel/pause/skip while awaiting
 
+    if (text === undefined) {
+      if (attempt >= MAX_BUFFER_RETRIES) {
+        this.stop(); // genuinely nothing more to read
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, BUFFER_RETRY_MS));
+      if (seq !== this.sequence) return;
+      void this.speakFrom(index, attempt + 1);
+      return;
+    }
+
+    this.deps.onChunkText(text);
+    void this.getChunkCached(index + 1); // best-effort prefetch, doesn't block speaking
+
+    const synth = getSynth();
+    if (!synth) {
+      this.setStatus("idle");
+      return;
+    }
+
+    this.setStatus("playing");
     try {
-      const utterance = new SpeechSynthesisUtterance(this.chunks[index]);
+      const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = this.rate;
       if (this.voice) utterance.voice = this.voice;
+
+      const advance = () => {
+        if (seq !== this.sequence) return;
+        void this.speakFrom(index + 1);
+      };
       utterance.onend = advance;
       utterance.onerror = advance;
       synth.speak(utterance);
