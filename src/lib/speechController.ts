@@ -113,13 +113,18 @@ export class SpeechController {
   }
 
   skip(delta: number) {
+    this.goToChunk(this.index + delta);
+  }
+
+  /** Jumps to an arbitrary chunk — used for chapter navigation ("goToSection" at the App layer resolves a section to its firstChunkIndex and calls this). */
+  goToChunk(index: number) {
     const wasActive = this.status === "playing" || this.status === "buffering";
     if (wasActive) {
       this.sequence += 1;
       getSynth()?.cancel();
     }
     const max = Math.max(this.totalChunks - 1, 0);
-    this.index = Math.min(Math.max(this.index + delta, 0), max);
+    this.index = Math.min(Math.max(index, 0), max);
     this.deps.onIndexChange(this.index);
     if (wasActive) {
       void this.speakFrom(this.index);
@@ -157,9 +162,6 @@ export class SpeechController {
   }
 
   private async speakFrom(index: number, attempt = 0) {
-    this.index = index;
-    this.deps.onIndexChange(index);
-
     this.sequence += 1;
     const seq = this.sequence;
 
@@ -178,6 +180,11 @@ export class SpeechController {
       return;
     }
 
+    // Only now that content is confirmed does this become "the current
+    // chunk" — reporting it earlier could momentarily point past the known
+    // end of the book while a buffering attempt is still in flight.
+    this.index = index;
+    this.deps.onIndexChange(index);
     this.deps.onChunkText(text);
     void this.getChunkCached(index + 1); // best-effort prefetch, doesn't block speaking
 

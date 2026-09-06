@@ -97,6 +97,59 @@ describe("SpeechController", () => {
     expect(speak).toHaveBeenCalledTimes(1);
   });
 
+  it("goToChunk jumps directly to an arbitrary index (chapter navigation) and updates the display", async () => {
+    const texts = ["a", "b", "c", "d", "e"];
+    const indexChanges: number[] = [];
+    const shown: (string | undefined)[] = [];
+    const controller = new SpeechController({
+      onIndexChange: (i) => indexChanges.push(i),
+      onStatusChange: () => {},
+      onChunkText: (t) => shown.push(t),
+      getChunkText: async (i) => texts[i],
+    });
+
+    controller.setBook(texts.length, 0);
+    controller.goToChunk(3); // e.g. a section's firstChunkIndex, selected from the chapters panel
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(controller.getIndex()).toBe(3);
+    expect(indexChanges).toContain(3);
+    expect(shown).toContain("d");
+  });
+
+  it("goToChunk while playing cancels the current utterance and speaks from the new index", async () => {
+    // Chunk 0's fetch is deliberately blocked until released, so goToChunk(4)
+    // is called while still "buffering" on chunk 0 — deterministic, no
+    // reliance on winning a race against how fast fake utterances cascade.
+    const texts = ["a", "b", "c", "d", "e"];
+    const { speak, cancel } = installFakeSpeechSynthesis();
+    let releaseFirstFetch = () => {};
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+
+    const controller = new SpeechController({
+      onIndexChange: () => {},
+      onStatusChange: () => {},
+      onChunkText: () => {},
+      getChunkText: async (i) => {
+        if (i === 0) await firstFetchGate;
+        return texts[i];
+      },
+    });
+
+    controller.setBook(texts.length, 0);
+    controller.play(); // synchronously reaches "buffering" on chunk 0, then awaits the blocked fetch
+    controller.goToChunk(4); // jump while that fetch is still pending
+
+    releaseFirstFetch(); // let the now-superseded chunk 0 fetch resolve — must be ignored
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(cancel).toHaveBeenCalled();
+    expect(controller.getIndex()).toBe(4);
+    expect(speak).toHaveBeenLastCalledWith(expect.objectContaining({ text: "e" }));
+  });
+
   it("pause/resume via skip does not leave the controller stuck mid-cancel", () => {
     const statuses: string[] = [];
     const controller = new SpeechController({

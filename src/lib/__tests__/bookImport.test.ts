@@ -1,8 +1,9 @@
+// PDF/TXT/MD only — no DOMParser needed, so this runs in the default 'node'
+// environment, where Blob round-trips correctly through fake-indexeddb (see
+// docxImport.test.ts / epubImport.test.ts for why DOCX/EPUB, which need
+// jsdom for DOMParser, are tested separately).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// pdfjs-dist needs real binary parsing + a worker, none of which is available
-// (or desirable) in a unit test — fake it with a small in-memory "document"
-// whose page texts are controlled per test via this hoisted-safe box.
 const pdfMock = vi.hoisted(() => ({ pages: [] as string[] }));
 
 vi.mock("pdfjs-dist", () => ({
@@ -11,8 +12,15 @@ vi.mock("pdfjs-dist", () => ({
     promise: Promise.resolve({
       numPages: pdfMock.pages.length,
       getPage: async (pageNumber: number) => ({
-        getTextContent: async () => ({ items: [{ str: pdfMock.pages[pageNumber - 1] }] }),
+        getTextContent: async () => ({
+          // One "line" per newline-separated fragment, each ending the line
+          // (hasEOL), matching how pdfImport.ts reconstructs lines for
+          // heading detection.
+          items: pdfMock.pages[pageNumber - 1].split("\n").map((str) => ({ str, hasEOL: true })),
+        }),
         cleanup: () => {},
+        getViewport: () => ({ width: 100, height: 100 }),
+        render: () => ({ promise: Promise.resolve() }),
       }),
       cleanup: async () => {},
     }),
@@ -20,7 +28,8 @@ vi.mock("pdfjs-dist", () => ({
 }));
 vi.mock("pdfjs-dist/build/pdf.worker.mjs?url", () => ({ default: "mock-worker.js" }));
 
-const { clearAllBooks, getBook, getChunkRange, putBook, putChunksBatch, putFileBlob } = await import("../db");
+const { clearAllBooks, getBook, getChunkRange, getFileBlob, getSections, putBook, putChunksBatch, putFileBlob, putSection } =
+  await import("../db");
 const { runImport, runResume } = await import("../bookImport");
 
 function makeTextFile(name: string, content: string): File {
@@ -31,14 +40,13 @@ function makePdfFile(name = "libro.pdf"): File {
   return new File([new Uint8Array([1, 2, 3])], name, { type: "application/pdf" });
 }
 
-describe("bookImport", () => {
+describe("bookImport — txt/md", () => {
   beforeEach(async () => {
     await clearAllBooks();
-    pdfMock.pages = [];
   });
 
   it("rejects unsupported formats without creating a book", async () => {
-    await expect(runImport(makeTextFile("libro.epub", "whatever"))).rejects.toThrow(/no soportado/i);
+    await expect(runImport(makeTextFile("libro.epub2", "whatever"))).rejects.toThrow(/no soportado/i);
   });
 
   it("imports a txt file in batches, reporting progress, and marks it done", async () => {
@@ -51,90 +59,140 @@ describe("bookImport", () => {
 
     expect(book.importStatus).toBe("done");
     expect(book.totalChunks).toBeGreaterThan(0);
-    expect(book.importedUntil).toBe(book.totalChunks);
     expect(percents.at(-1)).toBe(100);
 
     const chunks = await getChunkRange(book.id, 0, book.totalChunks - 1);
     expect(chunks).toHaveLength(book.totalChunks);
-    // contiguous, no gaps or duplicates
-    const indices = chunks.map((c) => c.index).sort((a, b) => a - b);
-    expect(indices).toEqual([...Array(book.totalChunks).keys()]);
+    expect(chunks.map((c) => c.index)).toEqual([...Array(book.totalChunks).keys()]);
   });
 
-  it("imports a pdf page by page, persisting after every page (not one giant blob)", async () => {
-    pdfMock.pages = ["Página uno con texto narrable.", "Página dos con más texto.", "Página tres, la última."];
-    const pagesSeen: number[] = [];
-
-    const book = await runImport(makePdfFile(), {
-      onProgress: (_b, p) => pagesSeen.push(p.page),
-    });
-
-    expect(book.importStatus).toBe("done");
-    expect(book.totalPages).toBe(3);
-    expect(pagesSeen).toEqual([1, 2, 3]); // one commit per page, in order
-
-    const finalBook = await getBook(book.id);
-    expect(finalBook?.importedUntil).toBe(3);
-    expect(finalBook?.totalChunks).toBe(3); // one short sentence per page here
+  it("detects chapters in a chapter-marked txt file", async () => {
+    const text = ["TIERRA", "", "CAPÍTULO 1", "", "Texto del capítulo uno.", "", "CAPÍTULO 2", "", "Texto del capítulo dos."].join("\n");
+    const book = await runImport(makeTextFile("libro.txt", text));
+    const sections = await getSections(book.id);
+    expect(sections.map((s) => s.title)).toEqual([null, "Capítulo 1", "Capítulo 2"]);
   });
 
-  it("keeps only one active book: a new import clears the previous one's chunks", async () => {
-    pdfMock.pages = ["Primero."];
-    const first = await runImport(makePdfFile("uno.pdf"));
+  it("detects markdown headings for a .md file", async () => {
+    const text = "# TIERRA\n\nTexto.\n\n## Capítulo 1\n\nMás texto.";
+    const book = await runImport(makeTextFile("libro.md", text));
+    expect(book.format).toBe("md");
+    const sections = await getSections(book.id);
+    expect(sections.map((s) => s.title)).toEqual(["TIERRA", "Capítulo 1"]);
+  });
 
-    pdfMock.pages = ["Segundo."];
-    const second = await runImport(makePdfFile("dos.pdf"));
+  it("keeps only one active book: a new import clears the previous one's chunks and sections", async () => {
+    const first = await runImport(makeTextFile("uno.txt", "Contenido del primer libro, con suficiente texto."));
+    const second = await runImport(makeTextFile("dos.txt", "Contenido del segundo libro, con suficiente texto."));
 
     expect(await getBook(first.id)).toBeUndefined();
     expect((await getChunkRange(first.id, 0, 10)).length).toBe(0);
+    expect((await getSections(first.id)).length).toBe(0);
     expect((await getBook(second.id))?.importStatus).toBe("done");
   });
+});
 
-  it("resume continues a pdf import from the interruption point with no duplicated or missing chunks", async () => {
-    pdfMock.pages = ["Uno.", "Dos.", "Tres.", "Cuatro.", "Cinco."];
+describe("bookImport — pdf", () => {
+  beforeEach(async () => {
+    await clearAllBooks();
+    pdfMock.pages = [];
+  });
+
+  it("imports a pdf page by page and deletes the file blob once done", async () => {
+    pdfMock.pages = ["Página uno con texto narrable.", "Página dos con más texto.", "Página tres, la última."];
+    const pagesSeen: number[] = [];
+
+    const book = await runImport(makePdfFile(), { onProgress: (_b, p) => pagesSeen.push(p.page) });
+
+    expect(book.importStatus).toBe("done");
+    expect(book.totalPages).toBe(3);
+    expect(pagesSeen).toEqual([1, 2, 3]);
+    expect(await getFileBlob(book.id)).toBeUndefined(); // cleaned up once import completed
+  });
+
+  it("the file blob exists while importing and is gone once complete", async () => {
+    pdfMock.pages = ["Texto de una sola página."];
+    let sawBlobDuringImport = false;
+    await runImport(makePdfFile(), {
+      onProgress: async (b) => {
+        if (!sawBlobDuringImport) sawBlobDuringImport = (await getFileBlob(b.id)) !== undefined;
+      },
+    });
+    expect(sawBlobDuringImport).toBe(true);
+  });
+
+  it("detects a conservative chapter heading and excludes it from the narrated text", async () => {
+    pdfMock.pages = ["CAPÍTULO 1\nEl relojero Tomás siguió reparando mecanismos antiguos.", "Más texto de la misma sección."];
+    const book = await runImport(makePdfFile());
+
+    const sections = await getSections(book.id);
+    expect(sections.map((s) => s.title)).toEqual(["Capítulo 1"]);
+
+    const chunks = await getChunkRange(book.id, 0, book.totalChunks - 1);
+    for (const c of chunks) expect(c.text).not.toContain("CAPÍTULO");
+  });
+
+  it("falls back to a single section for a pdf with no chapter markers (no false positives)", async () => {
+    pdfMock.pages = ["Texto normal de la página uno.", "Texto normal de la página dos.", "Texto normal de la página tres."];
+    const book = await runImport(makePdfFile());
+    const sections = await getSections(book.id);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].title).toBeNull();
+  });
+
+  it("resume continues a pdf import from the interruption point with no duplicated chunks or sections", async () => {
+    pdfMock.pages = ["CAPÍTULO 1\nUno.", "Dos.", "CAPÍTULO 2\nTres.", "Cuatro."];
     const bookId = "resume-test";
     const now = Date.now();
 
-    // Simulate an import that committed pages 1-2 and then got interrupted.
+    // Simulate an import interrupted right after page 1 (chapter 1 opened, one chunk written).
     await putBook({
       id: bookId,
       title: "Resume test",
+      author: null,
+      language: null,
       format: "pdf",
       size: 10,
-      totalPages: 5,
-      totalChunks: 2,
+      totalPages: 4,
+      totalSections: 1,
+      totalChunks: 1,
+      wordCount: 1,
+      currentSection: 0,
       currentChunk: 0,
       importStatus: "importing",
-      importedUntil: 2,
+      importStage: "extracting",
+      importProgress: 25,
+      importedUntil: 1,
+      hasCover: false,
       rate: 1,
       voiceURI: null,
       createdAt: now,
       updatedAt: now,
+      lastOpenedAt: now,
     });
-    await putChunksBatch([
-      { bookId, index: 0, sectionIndex: 0, sourcePage: 1, text: "Uno." },
-      { bookId, index: 1, sectionIndex: 1, sourcePage: 2, text: "Dos." },
-    ]);
+    await putSection({ bookId, index: 0, title: "Capítulo 1", level: 1, sourceType: "page", sourceStart: 1, sourceEnd: 1, firstChunkIndex: 0, lastChunkIndex: null, wordCount: 0 });
+    await putChunksBatch([{ bookId, index: 0, sectionIndex: 0, sourcePage: 1, text: "Uno." }]);
     await putFileBlob(bookId, new Blob(["fake-pdf-bytes"]));
 
     const interrupted = (await getBook(bookId))!;
     const resumedPages: number[] = [];
     const finished = await runResume(interrupted, { onProgress: (_b, p) => resumedPages.push(p.page) });
 
-    expect(resumedPages).toEqual([3, 4, 5]); // only the remaining pages, not 1-2 again
+    expect(resumedPages).toEqual([2, 3, 4]);
     expect(finished.importStatus).toBe("done");
-    expect(finished.totalChunks).toBe(5);
+    expect(finished.totalChunks).toBe(4);
+
+    const sections = await getSections(bookId);
+    expect(sections.map((s) => s.title)).toEqual(["Capítulo 1", "Capítulo 2"]);
+    expect(sections[0].firstChunkIndex).toBe(0);
+    expect(sections[0].lastChunkIndex).toBe(1); // "Uno." (pre-seeded) + "Dos." (page 2, still chapter 1)
+    expect(sections[1].firstChunkIndex).toBe(2);
+    expect(sections[1].lastChunkIndex).toBe(3);
 
     const chunks = await getChunkRange(bookId, 0, 10);
-    const indices = chunks.map((c) => c.index).sort((a, b) => a - b);
-    expect(indices).toEqual([0, 1, 2, 3, 4]);
-    expect(chunks.sort((a, b) => a.index - b.index).map((c) => c.text)).toEqual([
-      "Uno.",
-      "Dos.",
-      "Tres.",
-      "Cuatro.",
-      "Cinco.",
-    ]);
+    expect(chunks.map((c) => c.index)).toEqual([0, 1, 2, 3]);
+    expect(chunks.map((c) => c.text)).toEqual(["Uno.", "Dos.", "Tres.", "Cuatro."]);
+    expect(await getFileBlob(bookId)).toBeUndefined();
   });
 
   it("resume fails gracefully (and marks the book errored) when the original file is gone", async () => {
@@ -143,19 +201,27 @@ describe("bookImport", () => {
     await putBook({
       id: bookId,
       title: "No blob",
+      author: null,
+      language: null,
       format: "pdf",
       size: 10,
       totalPages: 5,
+      totalSections: 1,
       totalChunks: 1,
+      wordCount: 1,
+      currentSection: 0,
       currentChunk: 0,
       importStatus: "importing",
+      importStage: "extracting",
+      importProgress: 20,
       importedUntil: 1,
+      hasCover: false,
       rate: 1,
       voiceURI: null,
       createdAt: now,
       updatedAt: now,
+      lastOpenedAt: now,
     });
-    // No putFileBlob() call — the original bytes were never persisted or were evicted.
 
     const interrupted = (await getBook(bookId))!;
     let errorMessage: string | undefined;
@@ -165,23 +231,32 @@ describe("bookImport", () => {
     expect(errorMessage).toMatch(/no está disponible/i);
   });
 
-  it("resume on a non-pdf book fails without crashing (txt/docx aren't resumable mid-way)", async () => {
+  it("resume on a non-resumable format fails without crashing", async () => {
     const bookId = "txt-interrupted";
     const now = Date.now();
     await putBook({
       id: bookId,
       title: "Interrupted txt",
+      author: null,
+      language: null,
       format: "txt",
       size: 10,
       totalPages: null,
+      totalSections: 3,
       totalChunks: 200,
+      wordCount: 500,
+      currentSection: 0,
       currentChunk: 0,
       importStatus: "importing",
+      importStage: "persisting",
+      importProgress: 60,
       importedUntil: 200,
+      hasCover: false,
       rate: 1,
       voiceURI: null,
       createdAt: now,
       updatedAt: now,
+      lastOpenedAt: now,
     });
 
     const interrupted = (await getBook(bookId))!;
