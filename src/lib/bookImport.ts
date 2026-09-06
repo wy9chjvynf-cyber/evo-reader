@@ -174,7 +174,12 @@ async function importPdf(book: BookRecord, file: File, callbacks: ImportCallback
       nextSectionIndex: 0,
       openSection: null,
       onCover: (blob) => {
-        void putCover(book.id, blob).then(() => updateBook(book.id, { hasCover: true }));
+        // putCover degrades to undefined (not a rejection) if IndexedDB can't
+        // store this Blob on this device — only claim hasCover when it
+        // actually landed, so the UI never tries to load a cover that isn't there.
+        void putCover(book.id, blob).then((stored) => {
+          if (stored) void updateBook(book.id, { hasCover: true });
+        });
       },
       onProgress: ({ page, totalPages, chunksSoFar }) => {
         void (async () => {
@@ -229,7 +234,11 @@ async function importEpub(book: BookRecord, file: File, callbacks: ImportCallbac
           language: metadata.language,
           importStage: "extracting",
         });
-        if (coverBlob) void putCover(book.id, coverBlob).then(() => updateBook(book.id, { hasCover: true }));
+        if (coverBlob) {
+          void putCover(book.id, coverBlob).then((stored) => {
+            if (stored) void updateBook(book.id, { hasCover: true });
+          });
+        }
       },
       onProgress: ({ spineIndex, totalSpineItems, chunksSoFar }) => {
         void (async () => {
