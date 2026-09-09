@@ -49,6 +49,81 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
+// Presentation-only cleanup of filename-derived titles (e.g. "Capitulo_2_La_normalidad_muriendo"
+// -> "La normalidad muriendo"). Never touches the stored value.
+function humanizeTitle(raw: string): string {
+  const spaced = raw.replace(/[_-]+/g, " ").trim();
+  const withoutPrefix = spaced.replace(/^(cap[ií]tulo|chapter|parte|part|secci[oó]n|section)\s+\d+\s*/i, "");
+  return withoutPrefix.trim() || raw;
+}
+
+function IconSkipBack() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M6 6v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M19 6 9 12l10 6V6Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function IconSkipForward() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M18 6v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M5 6l10 6-10 6V6Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function IconPlay() {
+  return (
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true">
+      <path d="M8 5v14l11-7-11-7Z" />
+    </svg>
+  );
+}
+
+function IconPause() {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="5" width="4.5" height="14" rx="1.5" />
+      <rect x="13.5" y="5" width="4.5" height="14" rx="1.5" />
+    </svg>
+  );
+}
+
+function IconStop() {
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+      <rect x="5" y="5" width="14" height="14" rx="2" />
+    </svg>
+  );
+}
+
+function IconChapters() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+      <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconChevronRight() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
+      <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconChevronDown() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [book, setBook] = useState<BookRecord | null>(null);
   const [sections, setSections] = useState<SectionRecord[]>([]);
@@ -394,21 +469,26 @@ function Reader({
     [book.wordCount, book.totalChunks, index, rate],
   );
 
+  const chapterEyebrow = currentSection?.title ? "Capítulo actual" : "Índice";
+  const chapterHeadline =
+    currentSection?.title ?? (sections.length > 0 ? `${sections.length} secciones` : "Sin capítulos");
+
   return (
     <div className="reader">
-      <div className="book-header">
+      <header className="book-header">
         {coverUrl && <img className="cover-thumb" src={coverUrl} alt="" />}
         <div className="book-header-text">
-          <h2 className="title">{book.title}</h2>
+          <h2 className="title">{humanizeTitle(book.title)}</h2>
           {book.author && <p className="author">{book.author}</p>}
-          {currentSection?.title && <p className="chapter-label">{currentSection.title}</p>}
+          {currentSection?.title && <p className="chapter-line">{currentSection.title}</p>}
         </div>
-      </div>
-      <div className="header-progress-track">
+      </header>
+
+      <div className="header-progress-track" aria-hidden="true">
         <div className="header-progress-fill" style={{ width: `${bookProgress}%` }} />
       </div>
 
-      <div className="reading-area">
+      <section className="reading-stage">
         {importProgress && (
           <div className="import-progress">
             <p className="import-progress-label">
@@ -432,23 +512,35 @@ function Reader({
         {!ttsSupported && (
           <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
         )}
-      </div>
+      </section>
 
-      <div className="player">
-        <div className="progress-row">
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${bookProgress}%` }} />
-          </div>
-          <span className="progress-label">
-            {currentSection?.title ? `${sectionProgress ?? bookProgress}% del capítulo · ` : ""}
-            Libro {bookProgress}%
-            {remainingLabel ? ` · Quedan ${remainingLabel}` : ""}
+      <section className="player">
+        <button type="button" className="player-chapters-trigger" onClick={onOpenChapters} disabled={sections.length === 0}>
+          <span className="player-chapters-icon">
+            <IconChapters />
           </span>
+          <span className="player-chapters-text">
+            <span className="player-chapters-eyebrow">{chapterEyebrow}</span>
+            <span className="player-chapters-title">{chapterHeadline}</span>
+          </span>
+          <IconChevronRight />
+        </button>
+
+        <div className="player-progress">
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${sectionProgress ?? bookProgress}%` }} />
+          </div>
+          <div className="player-progress-meta">
+            <span>{sectionProgress ?? bookProgress}% del capítulo</span>
+            <span>
+              Libro {bookProgress}%{remainingLabel ? ` · ${remainingLabel} restantes` : ""}
+            </span>
+          </div>
         </div>
 
         <div className="transport">
-          <button className="icon-button" aria-label="Retroceder" onClick={() => controller.skip(-1)} disabled={index <= 0}>
-            ⏪
+          <button className="transport-button" aria-label="Retroceder" onClick={() => controller.skip(-1)} disabled={index <= 0}>
+            <IconSkipBack />
           </button>
 
           <button
@@ -457,27 +549,25 @@ function Reader({
             onClick={() => (status === "playing" || status === "buffering" ? controller.pause() : controller.play())}
             disabled={!ttsSupported || total === 0}
           >
-            {status === "playing" || status === "buffering" ? "⏸" : "▶"}
+            {status === "playing" || status === "buffering" ? <IconPause /> : <IconPlay />}
           </button>
 
-          <button className="icon-button" aria-label="Adelantar" onClick={() => controller.skip(1)} disabled={index >= total - 1}>
-            ⏩
+          <button className="transport-button" aria-label="Adelantar" onClick={() => controller.skip(1)} disabled={index >= total - 1}>
+            <IconSkipForward />
           </button>
         </div>
 
-        <div className="player-secondary">
-          <button className="stop-link" onClick={() => controller.stop()}>
-            ⏹ Detener
-          </button>
-
-          <button className="chapters-button" onClick={onOpenChapters} disabled={sections.length === 0}>
-            📖 Capítulos {sections.length > 0 ? `(${sections.length})` : ""}
-          </button>
-        </div>
-      </div>
+        <button className="stop-button" onClick={() => controller.stop()}>
+          <IconStop />
+          <span>Detener</span>
+        </button>
+      </section>
 
       <details className="more-panel">
-        <summary>Ajustes y opciones</summary>
+        <summary>
+          <span>Ajustes y opciones</span>
+          <IconChevronDown />
+        </summary>
         <div className="more-panel-body">
           <div className="settings">
             <label className="setting">
