@@ -274,6 +274,12 @@ select {
     padding-bottom: 268px;
   }
 
+  .current-text {
+    max-height: max(160px, calc(100dvh - 420px));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .player {
     position: fixed;
     left: 10px;
