@@ -404,103 +404,119 @@ function Reader({
           {currentSection?.title && <p className="chapter-label">{currentSection.title}</p>}
         </div>
       </div>
+      <div className="header-progress-track">
+        <div className="header-progress-fill" style={{ width: `${bookProgress}%` }} />
+      </div>
 
-      {importProgress && (
-        <div className="import-progress">
-          <p className="import-progress-label">
-            Procesando {book.title}… {STAGE_LABELS[book.importStage]}
-            {importProgress.totalPages ? ` · ${book.format === "pdf" ? "Página" : "Sección"} ${importProgress.page} de ${importProgress.totalPages}` : ""}
-            {importProgress.percent !== null ? ` · ${importProgress.percent}%` : ""}
-          </p>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${importProgress.percent ?? 0}%` }} />
+      <div className="reading-area">
+        {importProgress && (
+          <div className="import-progress">
+            <p className="import-progress-label">
+              Procesando {book.title}… {STAGE_LABELS[book.importStage]}
+              {importProgress.totalPages ? ` · ${book.format === "pdf" ? "Página" : "Sección"} ${importProgress.page} de ${importProgress.totalPages}` : ""}
+              {importProgress.percent !== null ? ` · ${importProgress.percent}%` : ""}
+            </p>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${importProgress.percent ?? 0}%` }} />
+            </div>
+            {importProgress.playable && <p className="notice">Ya puedes comenzar a escuchar mientras terminamos de procesarlo.</p>}
           </div>
-          {importProgress.playable && <p className="notice">Ya puedes comenzar a escuchar mientras terminamos de procesarlo.</p>}
+        )}
+
+        <div className={`current-text${status === "playing" ? " is-playing" : ""}`}>
+          {currentText || (importing ? "Preparando el texto…" : "")}
         </div>
-      )}
 
-      <div className="current-text">{currentText || (importing ? "Preparando el texto…" : "")}</div>
+        {status === "buffering" && <p className="notice">Cargando…</p>}
 
-      {status === "buffering" && <p className="notice">Cargando…</p>}
-
-      {!ttsSupported && (
-        <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
-      )}
-
-      <div className="transport">
-        <button className="icon-button" aria-label="Retroceder" onClick={() => controller.skip(-1)} disabled={index <= 0}>
-          ⏪
-        </button>
-
-        <button
-          className="play-button"
-          aria-label={status === "playing" ? "Pausar" : "Reproducir"}
-          onClick={() => (status === "playing" || status === "buffering" ? controller.pause() : controller.play())}
-          disabled={!ttsSupported || total === 0}
-        >
-          {status === "playing" || status === "buffering" ? "⏸" : "▶"}
-        </button>
-
-        <button className="icon-button" aria-label="Adelantar" onClick={() => controller.skip(1)} disabled={index >= total - 1}>
-          ⏩
-        </button>
+        {!ttsSupported && (
+          <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
+        )}
       </div>
 
-      <button className="stop-link" onClick={() => controller.stop()}>
-        ⏹ Detener
-      </button>
-
-      <button className="chapters-button" onClick={onOpenChapters} disabled={sections.length === 0}>
-        📖 Capítulos {sections.length > 0 ? `(${sections.length})` : ""}
-      </button>
-
-      <div className="progress-row">
-        <div className="progress-track">
-          <div className="progress-fill" style={{ width: `${bookProgress}%` }} />
+      <div className="player">
+        <div className="progress-row">
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${bookProgress}%` }} />
+          </div>
+          <span className="progress-label">
+            {currentSection?.title ? `${sectionProgress ?? bookProgress}% del capítulo · ` : ""}
+            Libro {bookProgress}%
+            {remainingLabel ? ` · Quedan ${remainingLabel}` : ""}
+          </span>
         </div>
-        <span className="progress-label">
-          {currentSection?.title ? `${sectionProgress ?? bookProgress}% del capítulo · ` : ""}
-          Libro {bookProgress}%
-          {remainingLabel ? ` · Quedan ${remainingLabel}` : ""}
-        </span>
+
+        <div className="transport">
+          <button className="icon-button" aria-label="Retroceder" onClick={() => controller.skip(-1)} disabled={index <= 0}>
+            ⏪
+          </button>
+
+          <button
+            className="play-button"
+            aria-label={status === "playing" ? "Pausar" : "Reproducir"}
+            onClick={() => (status === "playing" || status === "buffering" ? controller.pause() : controller.play())}
+            disabled={!ttsSupported || total === 0}
+          >
+            {status === "playing" || status === "buffering" ? "⏸" : "▶"}
+          </button>
+
+          <button className="icon-button" aria-label="Adelantar" onClick={() => controller.skip(1)} disabled={index >= total - 1}>
+            ⏩
+          </button>
+        </div>
+
+        <div className="player-secondary">
+          <button className="stop-link" onClick={() => controller.stop()}>
+            ⏹ Detener
+          </button>
+
+          <button className="chapters-button" onClick={onOpenChapters} disabled={sections.length === 0}>
+            📖 Capítulos {sections.length > 0 ? `(${sections.length})` : ""}
+          </button>
+        </div>
       </div>
 
-      <div className="settings">
-        <label className="setting">
-          <span>Velocidad {rate.toFixed(2)}x</span>
-          <input
-            type="range"
-            min={MIN_RATE}
-            max={MAX_RATE}
-            step={0.05}
-            value={rate}
-            onChange={(e) => onRateChange(Number(e.target.value))}
-          />
-        </label>
+      <details className="more-panel">
+        <summary>Ajustes y opciones</summary>
+        <div className="more-panel-body">
+          <div className="settings">
+            <label className="setting">
+              <span>Velocidad {rate.toFixed(2)}x</span>
+              <input
+                type="range"
+                min={MIN_RATE}
+                max={MAX_RATE}
+                step={0.05}
+                value={rate}
+                onChange={(e) => onRateChange(Number(e.target.value))}
+              />
+            </label>
 
-        <label className="setting">
-          <span>Voz</span>
-          <select value={voiceURI ?? ""} onChange={(e) => onVoiceChange(e.target.value)}>
-            {voiceURI === null && <option value="">Predeterminada</option>}
-            {voices.map((v) => (
-              <option key={v.voiceURI} value={v.voiceURI}>
-                {v.name} ({v.lang})
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+            <label className="setting">
+              <span>Voz</span>
+              <select value={voiceURI ?? ""} onChange={(e) => onVoiceChange(e.target.value)}>
+                {voiceURI === null && <option value="">Predeterminada</option>}
+                {voices.map((v) => (
+                  <option key={v.voiceURI} value={v.voiceURI}>
+                    {v.name} ({v.lang})
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
 
-      {error && <p className="error">{error}</p>}
+          {error && <p className="error">{error}</p>}
 
-      <label className="load-button secondary">
-        {busy ? "Cargando…" : "Cargar otro libro"}
-        <input type="file" accept=".pdf,.epub,.txt,.md,.docx" onChange={onFileChange} disabled={busy || importing} hidden />
-      </label>
+          <label className="load-button secondary">
+            {busy ? "Cargando…" : "Cargar otro libro"}
+            <input type="file" accept=".pdf,.epub,.txt,.md,.docx" onChange={onFileChange} disabled={busy || importing} hidden />
+          </label>
 
-      <button className="text-link" onClick={onOpenDiagnostics}>
-        Diagnóstico
-      </button>
+          <button className="text-link" onClick={onOpenDiagnostics}>
+            Diagnóstico
+          </button>
+        </div>
+      </details>
 
       {showChapters && (
         <ChaptersPanel
