@@ -1,3 +1,5 @@
+import { createSpeechEngine, type SpeechEngine, type SpeechVoice } from "./speechEngine";
+
 export type PlaybackStatus = "idle" | "playing" | "paused" | "buffering";
 
 interface SpeechControllerDeps {
@@ -9,20 +11,16 @@ interface SpeechControllerDeps {
   getChunkText: (index: number) => Promise<string | undefined>;
 }
 
-function getSynth(): SpeechSynthesis | undefined {
-  return typeof window !== "undefined" ? window.speechSynthesis : undefined;
-}
-
 const CACHE_WINDOW = 6;
 const MAX_BUFFER_RETRIES = 25;
 const BUFFER_RETRY_MS = 400;
 
 /**
- * Speaks a book's chunks one at a time via window.speechSynthesis, fetching
- * each chunk's text on demand (plus a small one-ahead prefetch) instead of
- * holding the whole book's text in memory — a book can have tens of
- * thousands of chunks, and PDF import can still be filling in later ones
- * while narration is already underway.
+ * Speaks a book's chunks one at a time via a SpeechEngine, fetching each
+ * chunk's text on demand (plus a small one-ahead prefetch) instead of holding
+ * the whole book's text in memory — a book can have tens of thousands of
+ * chunks, and PDF import can still be filling in later ones while narration
+ * is already underway.
  *
  * "buffering" status covers both waiting for the next chunk to actually
  * exist yet (import still catching up — this is what lets Play start before
@@ -30,34 +28,40 @@ const BUFFER_RETRY_MS = 400;
  * If a chunk never shows up after MAX_BUFFER_RETRIES, that's treated as the
  * real end of the book.
  *
- * Pause/resume is implemented as cancel + re-speak-from-index rather than the
- * native pause()/resume(), because native pause/resume is unreliable on
- * mobile Safari/Chrome (utterances can get silently stuck). Each speak()
- * call is tagged with a sequence number so a stale event from a canceled
- * utterance can't be mistaken for a genuine completion.
+ * Pause/resume is implemented as cancel + re-speak-from-index rather than an
+ * engine-native pause()/resume() (see SpeechEngineCapabilities.reliablePauseResume
+ * — Web Speech's is unreliable on mobile Safari/Chrome, utterances can get
+ * silently stuck). Each speak() call is tagged with a sequence number so a
+ * stale event from a canceled utterance can't be mistaken for a genuine
+ * completion.
+ *
+ * This class knows nothing about window.speechSynthesis or any other
+ * platform API — all of that lives behind the injected SpeechEngine.
  */
 export class SpeechController {
   private totalChunks = 0;
   private index = 0;
   private rate = 1;
-  private voice: SpeechSynthesisVoice | null = null;
+  private voice: SpeechVoice | null = null;
   private status: PlaybackStatus = "idle";
   private sequence = 0;
   private cache = new Map<number, string>();
   private deps: SpeechControllerDeps;
+  private engine: SpeechEngine;
 
-  constructor(deps: SpeechControllerDeps) {
+  constructor(deps: SpeechControllerDeps, engine: SpeechEngine = createSpeechEngine()) {
     this.deps = deps;
+    this.engine = engine;
   }
 
   static isSupported(): boolean {
-    return typeof window !== "undefined" && !!window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function";
+    return createSpeechEngine().isSupported();
   }
 
   /** Loads a (possibly still-importing) book: totalChunks is the best-known count so far. */
   setBook(totalChunks: number, startIndex = 0) {
     this.sequence += 1;
-    getSynth()?.cancel();
+    this.engine.cancel();
     this.totalChunks = totalChunks;
     this.cache.clear();
     this.index = Math.min(Math.max(startIndex, 0), Math.max(totalChunks - 1, 0));
@@ -78,7 +82,7 @@ export class SpeechController {
     this.rate = rate;
   }
 
-  setVoice(voice: SpeechSynthesisVoice | null) {
+  setVoice(voice: SpeechVoice | null) {
     this.voice = voice;
   }
 
@@ -91,7 +95,7 @@ export class SpeechController {
   }
 
   play() {
-    if (!SpeechController.isSupported()) return;
+    if (!this.engine.isSupported()) return;
     if (this.totalChunks > 0 && this.index >= this.totalChunks) this.index = 0;
     void this.speakFrom(this.index);
   }
@@ -99,13 +103,13 @@ export class SpeechController {
   pause() {
     if (this.status !== "playing" && this.status !== "buffering") return;
     this.sequence += 1;
-    getSynth()?.cancel();
+    this.engine.cancel();
     this.setStatus("paused");
   }
 
   stop() {
     this.sequence += 1;
-    getSynth()?.cancel();
+    this.engine.cancel();
     this.index = 0;
     this.setStatus("idle");
     this.deps.onIndexChange(0);
@@ -121,7 +125,7 @@ export class SpeechController {
     const wasActive = this.status === "playing" || this.status === "buffering";
     if (wasActive) {
       this.sequence += 1;
-      getSynth()?.cancel();
+      this.engine.cancel();
     }
     const max = Math.max(this.totalChunks - 1, 0);
     this.index = Math.min(Math.max(index, 0), max);
@@ -188,27 +192,16 @@ export class SpeechController {
     this.deps.onChunkText(text);
     void this.getChunkCached(index + 1); // best-effort prefetch, doesn't block speaking
 
-    const synth = getSynth();
-    if (!synth) {
+    if (!this.engine.isSupported()) {
       this.setStatus("idle");
       return;
     }
 
     this.setStatus("playing");
-    try {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = this.rate;
-      if (this.voice) utterance.voice = this.voice;
-
-      const advance = () => {
-        if (seq !== this.sequence) return;
-        void this.speakFrom(index + 1);
-      };
-      utterance.onend = advance;
-      utterance.onerror = advance;
-      synth.speak(utterance);
-    } catch {
-      this.setStatus("idle");
-    }
+    const advance = () => {
+      if (seq !== this.sequence) return;
+      void this.speakFrom(index + 1);
+    };
+    this.engine.speak(text, { rate: this.rate, voice: this.voice, onEnd: advance, onError: advance });
   }
 }

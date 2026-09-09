@@ -17,6 +17,7 @@ import {
 import { findSectionForChunk } from "./lib/sectionLookup";
 import { estimateRemainingLabel } from "./lib/timeEstimate";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
+import type { SpeechVoice } from "./lib/speechEngine";
 import { useVoices } from "./lib/useVoices";
 
 const MIN_RATE = 0.75;
@@ -247,7 +248,7 @@ export default function App() {
     const spanish = voices.find((v) => v.lang.toLowerCase().startsWith("es"));
     if (spanish) {
       autoPickedVoice.current = true;
-      setVoiceURI(spanish.voiceURI);
+      setVoiceURI(spanish.id);
     }
   }, [voices]);
 
@@ -256,7 +257,7 @@ export default function App() {
   }, [controller, rate]);
 
   useEffect(() => {
-    const voice = voices.find((v) => v.voiceURI === voiceURI) ?? null;
+    const voice = voices.find((v) => v.id === voiceURI) ?? null;
     controller.setVoice(voice);
   }, [controller, voiceURI, voices]);
 
@@ -405,7 +406,7 @@ interface ReaderProps {
   status: PlaybackStatus;
   rate: number;
   voiceURI: string | null;
-  voices: SpeechSynthesisVoice[];
+  voices: SpeechVoice[];
   importProgress: ImportProgressInfo | null;
   busy: boolean;
   error: string | null;
@@ -587,7 +588,7 @@ function Reader({
               <select value={voiceURI ?? ""} onChange={(e) => onVoiceChange(e.target.value)}>
                 {voiceURI === null && <option value="">Predeterminada</option>}
                 {voices.map((v) => (
-                  <option key={v.voiceURI} value={v.voiceURI}>
+                  <option key={v.id} value={v.id}>
                     {v.name} ({v.lang})
                   </option>
                 ))}
