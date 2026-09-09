@@ -270,6 +270,9 @@ select {
 }
 
 @media (max-width: 640px) {
+  /* Reserve the fixed player's footprint at the end of the flow, so the
+     whole reader (including the settings disclosure) stays reachable by
+     scrolling past it, and the reading text itself never renders underneath. */
   .reader {
     padding-bottom: 268px;
   }
