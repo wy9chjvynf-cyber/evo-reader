@@ -58,6 +58,30 @@ function humanizeTitle(raw: string): string {
   return withoutPrefix.trim() || raw;
 }
 
+const VOICE_QUALITY_RANK: Record<string, number> = { premium: 0, enhanced: 1, default: 2 };
+
+// Display-only: groups by language, then surfaces the best-quality voices
+// first within each — never changes which voice.id is actually selected.
+function sortVoicesForDisplay(list: SpeechVoice[]): SpeechVoice[] {
+  return [...list].sort((a, b) => {
+    if (a.lang !== b.lang) return a.lang.localeCompare(b.lang);
+    const rankA = a.personal ? -1 : (VOICE_QUALITY_RANK[a.quality ?? "default"] ?? 2);
+    const rankB = b.personal ? -1 : (VOICE_QUALITY_RANK[b.quality ?? "default"] ?? 2);
+    if (rankA !== rankB) return rankA - rankB;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+// Only appends a quality/personal badge when the engine actually reported it
+// (NativeIosSpeechEngine) — Web Speech voices never get a fabricated label.
+function voiceLabel(v: SpeechVoice): string {
+  const base = `${v.name} (${v.lang})`;
+  if (v.personal) return `${base} · Personal`;
+  if (v.quality === "premium") return `${base} · Premium`;
+  if (v.quality === "enhanced") return `${base} · Enhanced`;
+  return base;
+}
+
 function IconSkipBack() {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -587,9 +611,9 @@ function Reader({
               <span>Voz</span>
               <select value={voiceURI ?? ""} onChange={(e) => onVoiceChange(e.target.value)}>
                 {voiceURI === null && <option value="">Predeterminada</option>}
-                {voices.map((v) => (
+                {sortVoicesForDisplay(voices).map((v) => (
                   <option key={v.id} value={v.id}>
-                    {v.name} ({v.lang})
+                    {voiceLabel(v)}
                   </option>
                 ))}
               </select>

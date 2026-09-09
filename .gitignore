@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 dist
+# CAP_BUILD=1 output (see vite.config.ts) — consumed by `cap sync ios` into
+# ios/App/App/public, which Capacitor's own ios/.gitignore already excludes.
+dist-ios
 dist-ssr
 *.local
 

@@ -6,12 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:ios": "tsc -b && CAP_BUILD=1 vite build && cap sync ios",
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {
+    "@capacitor/core": "^8.5.1",
+    "@capacitor/ios": "^8.5.1",
     "idb": "^8.0.3",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.2",
@@ -20,6 +23,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

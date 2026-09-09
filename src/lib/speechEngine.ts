@@ -5,6 +5,7 @@
  * cloud TTS, ...) can be swapped in via createSpeechEngine() without
  * touching Reader Core.
  */
+import { isNativeIosBridgeAvailable, NativeIosSpeechEngine } from "./nativeIosSpeechEngine";
 import { WebSpeechEngine } from "./webSpeechEngine";
 
 /** A voice, decoupled from any platform's native voice object. `id` is the
@@ -16,6 +17,11 @@ export interface SpeechVoice {
   name: string;
   lang: string;
   local: boolean;
+  /** Only set when an engine can actually report it (e.g. NativeIosSpeechEngine
+   *  from AVSpeechSynthesisVoiceQuality) — never fabricated for Web Speech. */
+  quality?: "default" | "enhanced" | "premium";
+  /** True only when the engine can positively identify an on-device Personal Voice. */
+  personal?: boolean;
 }
 
 export interface SpeakOptions {
@@ -50,13 +56,12 @@ export interface SpeechEngine {
 }
 
 /**
- * Single point of engine selection — today this always returns
- * WebSpeechEngine. A future native bridge would branch here, e.g.:
- *
- *   if (isNativeIosBridgeAvailable()) return new NativeIosSpeechEngine();
- *
- * No such bridge exists yet; this is only the seam it will plug into.
+ * Single point of engine selection. Picks NativeIosSpeechEngine only when the
+ * real EvoSpeech native plugin is detected (Capacitor.isPluginAvailable —
+ * never user-agent sniffing), so the web/PWA build automatically keeps using
+ * WebSpeechEngine exactly as before.
  */
 export function createSpeechEngine(): SpeechEngine {
+  if (isNativeIosBridgeAvailable()) return new NativeIosSpeechEngine();
   return new WebSpeechEngine();
 }
