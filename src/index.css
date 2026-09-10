@@ -272,13 +272,20 @@ select {
 @media (max-width: 640px) {
   /* Reserve the fixed player's footprint at the end of the flow, so the
      whole reader (including the settings disclosure) stays reachable by
-     scrolling past it, and the reading text itself never renders underneath. */
+     scrolling past it, and the reading text itself never renders underneath.
+     268px was measured against the player's rendered height in a zero-safe-area
+     environment (desktop browser automation, which always reports
+     env(safe-area-inset-bottom) as 0). On a real device with a home indicator,
+     the player grows taller AND sits further from the viewport edge — both
+     driven by that same safe-area value — so the reserve must add it back in
+     (doubled: once for the player's own bottom padding growing, once for its
+     `bottom` offset growing) instead of assuming a fixed player height. */
   .reader {
-    padding-bottom: 268px;
+    padding-bottom: calc(268px + (env(safe-area-inset-bottom) * 2));
   }
 
   .current-text {
-    max-height: max(160px, calc(100dvh - 420px));
+    max-height: max(160px, calc(100dvh - 420px - (env(safe-area-inset-bottom) * 2)));
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
