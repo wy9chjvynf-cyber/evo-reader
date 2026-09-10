@@ -31,6 +31,13 @@ export function isNativeIosBridgeAvailable(): boolean {
   return Capacitor.getPlatform() === "ios" && Capacitor.isPluginAvailable(PLUGIN_NAME);
 }
 
+/** Temporary diagnostic helper: the plugin-availability check on its own
+ *  (decoupled from the platform check above), to tell apart "wrong platform"
+ *  from "on iOS but the native plugin isn't actually registered". */
+export function isEvoSpeechPluginAvailable(): boolean {
+  return Capacitor.isPluginAvailable(PLUGIN_NAME);
+}
+
 /**
  * EvoReader's UI rate (see MIN_RATE/MAX_RATE in App.tsx) ranges 0.75–2.0 with
  * 1.0 as "normal", matching Web Speech's SpeechSynthesisUtterance.rate scale.

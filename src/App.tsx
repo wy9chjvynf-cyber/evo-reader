@@ -16,7 +16,7 @@ import {
 } from "./lib/db";
 import { findSectionForChunk } from "./lib/sectionLookup";
 import { estimateRemainingLabel } from "./lib/timeEstimate";
-import { isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
+import { isEvoSpeechPluginAvailable, isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
 import type { SpeechVoice } from "./lib/speechEngine";
 import { useVoices } from "./lib/useVoices";
@@ -653,6 +653,8 @@ function Reader({
             <dl className="diagnostics-list">
               <dt>Motor</dt>
               <dd>{isNativeEngine ? "Native iOS" : "Web"}</dd>
+              <dt>EvoSpeech disponible</dt>
+              <dd>{isEvoSpeechPluginAvailable() ? "sí" : "no"}</dd>
               <dt>Total de voces</dt>
               <dd>{voiceQualitySummary.total}</dd>
               <dt>Default</dt>
