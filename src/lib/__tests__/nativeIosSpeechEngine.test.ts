@@ -16,6 +16,14 @@ const pluginMock = {
   }),
 };
 
+const appResumeListeners: Array<() => void> = [];
+const appMock = {
+  addListener: vi.fn((eventName: string, listener: () => void) => {
+    if (eventName === "resume") appResumeListeners.push(listener);
+    return Promise.resolve({ remove: () => {} });
+  }),
+};
+
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     getPlatform: () => mockPlatform,
@@ -23,6 +31,11 @@ vi.mock("@capacitor/core", () => ({
   },
   registerPlugin: () => pluginMock,
 }));
+
+// Real @capacitor/app touches `document` in its web fallback constructor,
+// which doesn't exist in this file's (non-jsdom) test environment — mocked
+// like @capacitor/core so no real Capacitor code runs during these tests.
+vi.mock("@capacitor/app", () => ({ App: appMock }));
 
 const { createSpeechEngine } = await import("../speechEngine");
 const { isNativeIosBridgeAvailable, mapUiRateToNativeRate, NativeIosSpeechEngine } = await import("../nativeIosSpeechEngine");
@@ -32,6 +45,10 @@ function fireNativeEvent(name: string) {
   listeners[name]?.forEach((listener) => listener());
 }
 
+function fireAppResume() {
+  appResumeListeners.forEach((listener) => listener());
+}
+
 function flush() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -39,6 +56,7 @@ function flush() {
 beforeEach(() => {
   vi.clearAllMocks();
   for (const key of Object.keys(listeners)) delete listeners[key];
+  appResumeListeners.length = 0;
   mockPlatform = "ios";
   mockPluginAvailable = true;
   pluginMock.getVoices.mockResolvedValue({ voices: [] });
@@ -133,6 +151,39 @@ describe("NativeIosSpeechEngine", () => {
     const engine = new NativeIosSpeechEngine();
     await flush();
     expect(engine.getVoices()).toEqual([]);
+  });
+
+  it("re-queries voices when the app returns to the foreground (not polling — only on the 'resume' event)", async () => {
+    const engine = new NativeIosSpeechEngine();
+    await flush();
+    expect(pluginMock.getVoices).toHaveBeenCalledTimes(1); // just the constructor's initial fetch
+
+    pluginMock.getVoices.mockResolvedValue({
+      voices: [{ identifier: "com.apple.voice.new", name: "Recién descargada", language: "es-MX", quality: "enhanced" }],
+    });
+    fireAppResume();
+    await flush();
+
+    expect(pluginMock.getVoices).toHaveBeenCalledTimes(2);
+    expect(engine.getVoices()).toEqual([
+      { id: "com.apple.voice.new", name: "Recién descargada", lang: "es-MX", local: true, quality: "enhanced", personal: undefined },
+    ]);
+  });
+
+  it("public refreshVoices() forces a fresh query and notifies listeners, e.g. from a manual UI button", async () => {
+    const engine = new NativeIosSpeechEngine();
+    await flush();
+    const listener = vi.fn();
+    engine.onVoicesChanged(listener);
+
+    pluginMock.getVoices.mockResolvedValue({
+      voices: [{ identifier: "com.apple.voice.premium.es", name: "Voz Premium", language: "es-ES", quality: "premium" }],
+    });
+    engine.refreshVoices();
+    await flush();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(engine.getVoices()[0]).toMatchObject({ id: "com.apple.voice.premium.es", quality: "premium" });
   });
 
   it("speak() maps rate and resolves the voice by native identifier before calling the plugin", () => {

@@ -1,3 +1,4 @@
+import { App } from "@capacitor/app";
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import type { SpeakOptions, SpeechEngine, SpeechEngineCapabilities, SpeechVoice } from "./speechEngine";
 
@@ -93,17 +94,32 @@ export class NativeIosSpeechEngine implements SpeechEngine {
     // to invoke; no per-call correlation id is needed.
     void EvoSpeech.addListener("speechStart", () => this.currentOnStart?.());
     void EvoSpeech.addListener("speechEnd", () => this.currentOnEnd?.());
-    void this.refreshVoices();
+
+    // Re-fetch on init (below) and whenever the app comes back to the
+    // foreground — e.g. the user just downloaded an Enhanced/Premium voice
+    // in Settings and switched back. iOS suspends rather than relaunches on a
+    // simple background/foreground cycle, so without this the cached list
+    // from the original launch would never notice. Not polling: this fires
+    // only on the app's own 'resume' lifecycle event, never on a timer.
+    void App.addListener("resume", () => this.refreshVoices());
+
+    this.refreshVoices();
   }
 
-  private async refreshVoices(): Promise<void> {
-    try {
-      const { voices } = await EvoSpeech.getVoices();
-      this.cachedVoices = voices.map(toSpeechVoice);
-      this.voicesListeners.forEach((listener) => listener());
-    } catch {
-      // Fail soft — keep whatever was cached before (possibly still empty).
-    }
+  /** Forces a fresh AVSpeechSynthesisVoice.speechVoices() query (the plugin
+   *  never caches — see EvoSpeechPlugin.getVoices()) and notifies
+   *  onVoicesChanged listeners once it resolves. Also reachable from the UI
+   *  via the diagnostic "Actualizar voces" button. */
+  refreshVoices(): void {
+    void (async () => {
+      try {
+        const { voices } = await EvoSpeech.getVoices();
+        this.cachedVoices = voices.map(toSpeechVoice);
+        this.voicesListeners.forEach((listener) => listener());
+      } catch {
+        // Fail soft — keep whatever was cached before (possibly still empty).
+      }
+    })();
   }
 
   isSupported(): boolean {

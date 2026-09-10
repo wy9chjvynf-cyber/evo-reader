@@ -53,6 +53,13 @@ public class EvoSpeechPlugin: CAPPlugin, CAPBridgedPlugin, AVSpeechSynthesizerDe
     }
 
     @objc func getVoices(_ call: CAPPluginCall) {
+        // Always re-queries the system live — nothing here is cached on the
+        // Swift side. AVSpeechSynthesisVoice.speechVoices() itself reflects
+        // whatever voice packs are installed at the moment it's called, so a
+        // freshly downloaded Enhanced/Premium voice shows up on the very next
+        // call. Any staleness the JS side observes is in NativeIosSpeechEngine's
+        // own cache (see its refreshVoices()), not here.
+        //
         // Personal Voices are only returned by speechVoices() once the app has
         // requested and been granted AVSpeechSynthesizer.requestPersonalVoiceAuthorization —
         // deliberately not done in this phase, so none will appear yet. The
@@ -73,6 +80,9 @@ public class EvoSpeechPlugin: CAPPlugin, CAPBridgedPlugin, AVSpeechSynthesizerDe
         call.resolve(["voices": voices])
     }
 
+    // Quality classification comes exclusively from AVSpeechSynthesisVoice.quality —
+    // never from parsing `identifier` or `name` text. `identifier` is only ever
+    // surfaced to JS for diagnostics, never used here to guess quality.
     private func qualityName(_ quality: AVSpeechSynthesisVoiceQuality) -> String {
         switch quality {
         case .premium: return "premium"

@@ -83,6 +83,18 @@ function voiceLabel(v: SpeechVoice): string {
   return base;
 }
 
+// Diagnostic-only: counts voices by quality as actually reported by the
+// active engine — never inferred from name/identifier text.
+function summarizeVoicesByQuality(voices: SpeechVoice[]) {
+  const counts = { default: 0, enhanced: 0, premium: 0 };
+  let personal = 0;
+  for (const v of voices) {
+    counts[v.quality ?? "default"] += 1;
+    if (v.personal) personal += 1;
+  }
+  return { total: voices.length, ...counts, personal };
+}
+
 function IconSkipBack() {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -167,7 +179,7 @@ export default function App() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [storageUsage, setStorageUsage] = useState<{ usage: number; quota: number } | undefined>(undefined);
 
-  const voices = useVoices();
+  const { voices, refreshVoices } = useVoices();
   const autoPickedVoice = useRef(false);
   const bookIdRef = useRef<string | null>(null);
   const currentSectionIndexRef = useRef<number | null>(null);
@@ -398,6 +410,7 @@ export default function App() {
           rate={rate}
           voiceURI={voiceURI}
           voices={voices}
+          onRefreshVoices={refreshVoices}
           importProgress={importProgress}
           busy={busy}
           error={error}
@@ -432,6 +445,7 @@ interface ReaderProps {
   rate: number;
   voiceURI: string | null;
   voices: SpeechVoice[];
+  onRefreshVoices: () => void;
   importProgress: ImportProgressInfo | null;
   busy: boolean;
   error: string | null;
@@ -462,6 +476,7 @@ function Reader({
   rate,
   voiceURI,
   voices,
+  onRefreshVoices,
   importProgress,
   busy,
   error,
@@ -493,6 +508,13 @@ function Reader({
   const remainingLabel = useMemo(
     () => estimateRemainingLabel(book.wordCount, book.totalChunks, index, rate),
     [book.wordCount, book.totalChunks, index, rate],
+  );
+
+  const isNativeEngine = isNativeIosBridgeAvailable();
+  const voiceQualitySummary = useMemo(() => summarizeVoicesByQuality(voices), [voices]);
+  const spanishVoices = useMemo(
+    () => (isNativeEngine ? voices.filter((v) => v.lang.toLowerCase().startsWith("es")) : []),
+    [isNativeEngine, voices],
   );
 
   const chapterEyebrow = currentSection?.title ? "Capítulo actual" : "Índice";
@@ -621,6 +643,44 @@ function Reader({
             </label>
           </div>
 
+          <div className="voice-diagnostics">
+            <div className="voice-diagnostics-header">
+              <span className="voice-diagnostics-title">Diagnóstico de voz</span>
+              <button type="button" className="text-link" onClick={onRefreshVoices}>
+                Actualizar voces
+              </button>
+            </div>
+            <dl className="diagnostics-list">
+              <dt>Motor</dt>
+              <dd>{isNativeEngine ? "Native iOS" : "Web"}</dd>
+              <dt>Total de voces</dt>
+              <dd>{voiceQualitySummary.total}</dd>
+              <dt>Default</dt>
+              <dd>{voiceQualitySummary.default}</dd>
+              <dt>Enhanced</dt>
+              <dd>{voiceQualitySummary.enhanced}</dd>
+              <dt>Premium</dt>
+              <dd>{voiceQualitySummary.premium}</dd>
+              <dt>Personal</dt>
+              <dd>{voiceQualitySummary.personal}</dd>
+            </dl>
+
+            {isNativeEngine && (
+              <div className="voice-diagnostics-es">
+                <p className="diagnostics-voice-title">Voces es-* ({spanishVoices.length})</p>
+                {spanishVoices.map((v) => (
+                  <div key={v.id} className="voice-diagnostics-item">
+                    <p className="diagnostics-voice-line">{v.name}</p>
+                    <p className="diagnostics-voice-line">{v.lang}</p>
+                    <p className="diagnostics-voice-line">{v.quality ?? "default"}</p>
+                    <p className="diagnostics-voice-line">{v.id}</p>
+                    <p className="diagnostics-voice-line">personal: {v.personal ? "true" : "false"}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {error && <p className="error">{error}</p>}
 
           <label className="load-button secondary">
@@ -645,7 +705,7 @@ function Reader({
       )}
 
       {showDiagnostics && (
-        <DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} voices={voices} onClose={onCloseDiagnostics} />
+        <DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} onClose={onCloseDiagnostics} />
       )}
     </div>
   );
@@ -698,31 +758,11 @@ interface DiagnosticsPanelProps {
   book: BookRecord;
   sections: SectionRecord[];
   storageUsage: { usage: number; quota: number } | undefined;
-  voices: SpeechVoice[];
   onClose: () => void;
 }
 
-// Temporary diagnostic-only helper for auditing the native iOS voice
-// integration (EvoSpeechPlugin -> NativeIosSpeechEngine -> this quality
-// field) — surfaces only counts here, not a UI redesign.
-function summarizeNativeVoices(voices: SpeechVoice[]) {
-  const counts = { default: 0, enhanced: 0, premium: 0 };
-  let personal = 0;
-  const notable: string[] = [];
-  for (const v of voices) {
-    const quality = v.quality ?? "default";
-    counts[quality] += 1;
-    if (v.personal) personal += 1;
-    if (quality !== "default") notable.push(`${v.name} (${v.lang}) — ${quality}`);
-  }
-  return { total: voices.length, ...counts, personal, notable };
-}
-
-function DiagnosticsPanel({ book, sections, storageUsage, voices, onClose }: DiagnosticsPanelProps) {
+function DiagnosticsPanel({ book, sections, storageUsage, onClose }: DiagnosticsPanelProps) {
   const progress = book.totalChunks > 1 ? Math.round((book.currentChunk / (book.totalChunks - 1)) * 100) : 0;
-  // Only meaningful when NativeIosSpeechEngine is actually selected — on web
-  // this stays null and the block below renders nothing, unchanged from before.
-  const nativeVoices = isNativeIosBridgeAvailable() ? summarizeNativeVoices(voices) : null;
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -761,34 +801,7 @@ function DiagnosticsPanel({ book, sections, storageUsage, voices, onClose }: Dia
               </dd>
             </>
           )}
-          {nativeVoices && (
-            <>
-              <dt>Motor</dt>
-              <dd>Native iOS</dd>
-              <dt>Voces (total)</dt>
-              <dd>{nativeVoices.total}</dd>
-              <dt>Default</dt>
-              <dd>{nativeVoices.default}</dd>
-              <dt>Enhanced</dt>
-              <dd>{nativeVoices.enhanced}</dd>
-              <dt>Premium</dt>
-              <dd>{nativeVoices.premium}</dd>
-              <dt>Personal</dt>
-              <dd>{nativeVoices.personal}</dd>
-            </>
-          )}
         </dl>
-
-        {nativeVoices && nativeVoices.notable.length > 0 && (
-          <div className="diagnostics-voice-list">
-            <p className="diagnostics-voice-title">Voces Enhanced/Premium detectadas</p>
-            {nativeVoices.notable.map((label) => (
-              <p key={label} className="diagnostics-voice-line">
-                {label}
-              </p>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );

@@ -53,6 +53,10 @@ export interface SpeechEngine {
   getVoices(): SpeechVoice[];
   /** Subscribes to the engine's voice list changing (e.g. async voice loading). Returns an unsubscribe function. */
   onVoicesChanged(listener: () => void): () => void;
+  /** Forces a fresh re-query of available voices (e.g. after the user downloads a
+   *  voice pack in Settings). Optional — Web Speech's getVoices() is already
+   *  always current, so WebSpeechEngine doesn't need to implement this. */
+  refreshVoices?(): void;
 }
 
 /**

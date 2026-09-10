@@ -1,7 +1,14 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createSpeechEngine, type SpeechVoice } from "./speechEngine";
 
-export function useVoices(): SpeechVoice[] {
+export interface UseVoicesResult {
+  voices: SpeechVoice[];
+  /** Forces a fresh voice query (engines that don't need this, like
+   *  WebSpeechEngine, simply re-read their already-current list). */
+  refreshVoices: () => void;
+}
+
+export function useVoices(): UseVoicesResult {
   const [engine] = useState(() => createSpeechEngine());
   const [voices, setVoices] = useState<SpeechVoice[]>(() => engine.getVoices());
 
@@ -11,5 +18,10 @@ export function useVoices(): SpeechVoice[] {
     return engine.onVoicesChanged(update);
   }, [engine]);
 
-  return voices;
+  const refreshVoices = useCallback(() => {
+    engine.refreshVoices?.();
+    setVoices(engine.getVoices());
+  }, [engine]);
+
+  return { voices, refreshVoices };
 }
