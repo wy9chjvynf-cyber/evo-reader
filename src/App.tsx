@@ -16,6 +16,7 @@ import {
 } from "./lib/db";
 import { findSectionForChunk } from "./lib/sectionLookup";
 import { estimateRemainingLabel } from "./lib/timeEstimate";
+import { isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
 import type { SpeechVoice } from "./lib/speechEngine";
 import { useVoices } from "./lib/useVoices";
@@ -643,7 +644,9 @@ function Reader({
         />
       )}
 
-      {showDiagnostics && <DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} onClose={onCloseDiagnostics} />}
+      {showDiagnostics && (
+        <DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} voices={voices} onClose={onCloseDiagnostics} />
+      )}
     </div>
   );
 }
@@ -695,11 +698,31 @@ interface DiagnosticsPanelProps {
   book: BookRecord;
   sections: SectionRecord[];
   storageUsage: { usage: number; quota: number } | undefined;
+  voices: SpeechVoice[];
   onClose: () => void;
 }
 
-function DiagnosticsPanel({ book, sections, storageUsage, onClose }: DiagnosticsPanelProps) {
+// Temporary diagnostic-only helper for auditing the native iOS voice
+// integration (EvoSpeechPlugin -> NativeIosSpeechEngine -> this quality
+// field) — surfaces only counts here, not a UI redesign.
+function summarizeNativeVoices(voices: SpeechVoice[]) {
+  const counts = { default: 0, enhanced: 0, premium: 0 };
+  let personal = 0;
+  const notable: string[] = [];
+  for (const v of voices) {
+    const quality = v.quality ?? "default";
+    counts[quality] += 1;
+    if (v.personal) personal += 1;
+    if (quality !== "default") notable.push(`${v.name} (${v.lang}) — ${quality}`);
+  }
+  return { total: voices.length, ...counts, personal, notable };
+}
+
+function DiagnosticsPanel({ book, sections, storageUsage, voices, onClose }: DiagnosticsPanelProps) {
   const progress = book.totalChunks > 1 ? Math.round((book.currentChunk / (book.totalChunks - 1)) * 100) : 0;
+  // Only meaningful when NativeIosSpeechEngine is actually selected — on web
+  // this stays null and the block below renders nothing, unchanged from before.
+  const nativeVoices = isNativeIosBridgeAvailable() ? summarizeNativeVoices(voices) : null;
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -738,7 +761,34 @@ function DiagnosticsPanel({ book, sections, storageUsage, onClose }: Diagnostics
               </dd>
             </>
           )}
+          {nativeVoices && (
+            <>
+              <dt>Motor</dt>
+              <dd>Native iOS</dd>
+              <dt>Voces (total)</dt>
+              <dd>{nativeVoices.total}</dd>
+              <dt>Default</dt>
+              <dd>{nativeVoices.default}</dd>
+              <dt>Enhanced</dt>
+              <dd>{nativeVoices.enhanced}</dd>
+              <dt>Premium</dt>
+              <dd>{nativeVoices.premium}</dd>
+              <dt>Personal</dt>
+              <dd>{nativeVoices.personal}</dd>
+            </>
+          )}
         </dl>
+
+        {nativeVoices && nativeVoices.notable.length > 0 && (
+          <div className="diagnostics-voice-list">
+            <p className="diagnostics-voice-title">Voces Enhanced/Premium detectadas</p>
+            {nativeVoices.notable.map((label) => (
+              <p key={label} className="diagnostics-voice-line">
+                {label}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
