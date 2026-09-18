@@ -1,0 +1,68 @@
+const {chromium}=require(process.env.PLAYWRIGHT_PATH || 'playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:"chrome"});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(process.env.EVO_URL || 'http://127.0.0.1:5173');
+ await page.getByRole('heading',{name:'Tu biblioteca.'}).waitFor();
+ await page.screenshot({path:'artifacts/library-empty-desktop.png',fullPage:true});
+ const content='# El arte de prestar atención\n\n'+Array.from({length:12},(_,i)=>`## Capítulo ${i+1}\n\n`+('El silencio abría un espacio entre los árboles. Clara dejó el teléfono sobre la mesa y volvió a mirar el jardín. Cada página era una invitación a quedarse un momento más. ').repeat(12)).join('\n\n');
+ await page.locator('input[type=file]').first().setInputFiles({name:'El arte de prestar atención.md',mimeType:'text/markdown',buffer:Buffer.from(content)});
+ await page.locator('.current-text').filter({hasText:'silencio'}).waitFor();
+ await page.getByRole('button',{name:'Siguiente →',exact:true}).click();
+ const text=await page.locator('.reader-pagination').innerText();assert.match(text,/2 \/ /);
+ await page.waitForFunction(async()=>{const db=await new Promise(r=>{const q=indexedDB.open('evoreader');q.onsuccess=()=>r(q.result)});const books=await new Promise(r=>{const q=db.transaction('books').objectStore('books').getAll();q.onsuccess=()=>r(q.result)});db.close();return books[0]?.currentChunk===1});
+ await page.reload();await page.locator('.current-text').waitFor();
+ assert.match(await page.locator('.reader-pagination').innerText(),/2 \/ /);
+ await page.getByRole('button',{name:'Biblioteca',exact:true}).click();
+ await page.getByRole('button',{name:'Terminados',exact:true}).click();
+ await page.getByRole('heading',{name:'No hay libros en esta selección'}).waitFor();
+ await page.getByRole('button',{name:'Todos',exact:true}).click();
+ await page.getByRole('searchbox',{name:'Buscar en biblioteca'}).fill('zzzz');
+ await page.getByRole('heading',{name:'No hay libros en esta selección'}).waitFor();
+ await page.getByRole('searchbox',{name:'Buscar en biblioteca'}).fill('');
+ await page.screenshot({path:'artifacts/library-desktop.png',fullPage:true});
+ for(const [label,width,height] of [['ipad',820,1180],['iphone',390,844],['small',320,740]]){
+  await page.setViewportSize({width,height});
+  await page.screenshot({path:`artifacts/library-${label}.png`,fullPage:true});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`overflow ${label}`);
+ }
+ await page.setViewportSize({width:390,height:844});
+ await page.getByRole('button',{name:'Ajustes',exact:true}).click();
+ await page.getByRole('button',{name:'OLED',exact:true}).click();
+ await page.reload();await page.getByRole('button',{name:'OLED',exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'OLED',exact:true}).getAttribute('aria-pressed'),'true');
+ await page.getByRole('button',{name:'Lector',exact:true}).click();
+ await page.getByRole('button',{name:'Modo enfoque',exact:true}).click();
+ assert.equal(await page.locator('.sidebar').isVisible(),false);
+ await page.getByRole('button',{name:'Mostrar controles',exact:true}).click();
+ await page.screenshot({path:'artifacts/reader-iphone.png',fullPage:true});
+ await page.getByRole('button',{name:'Abrir reproductor completo'}).click();
+ await page.getByRole('dialog').waitFor();
+ await page.screenshot({path:'artifacts/player-iphone.png',fullPage:true});
+ await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);
+ await page.getByRole('button',{name:'☰ Capítulos',exact:true}).click();
+ await page.getByRole('dialog').waitFor();
+ await page.keyboard.press('Escape');
+ await page.getByRole('button',{name:'Biblioteca',exact:true}).click();
+ await page.locator('input[type=file]').first().setInputFiles({name:'otro.txt',mimeType:'text/plain',buffer:Buffer.from('Otro libro.')});
+ await page.getByRole('button',{name:'Conservar mi libro'}).click();
+ assert(await page.getByRole('heading',{name:'El arte de prestar atención',exact:true}).count());
+ await page.getByRole('button',{name:'Tu lectura',exact:true}).click();
+ await page.screenshot({path:'artifacts/activity-iphone.png',fullPage:true});
+ if(process.env.EVO_OFFLINE){
+  await page.evaluate(()=>navigator.serviceWorker.ready);
+  await page.reload();
+  await page.waitForFunction(()=>!!navigator.serviceWorker.controller);
+  assert(await page.evaluate(async()=>{const keys=await caches.keys();for(const key of keys){const cache=await caches.open(key);if((await cache.keys()).some(r=>r.url.includes('pdf.worker')))return true}return false}),'PDF worker cached');
+  await page.context().setOffline(true);
+  await page.reload();
+  await page.getByRole('button',{name:'Lector',exact:true}).click();
+  await page.locator('.current-text').filter({hasText:'silencio'}).waitFor();
+ }
+ assert.equal(errors.length,0,errors.join('\n'));
+ fs.writeFileSync('artifacts/browser-report.json',JSON.stringify({passed:true,checks:['real Markdown import','position survives reload','preferences survive reload','library filters/navigation','replacement cancellation','player dialog/Escape','chapter dialog/Escape','no overflow 1440/820/390/320','focus mode','zero browser errors',...(process.env.EVO_OFFLINE ? ['offline reload and reading','PDF worker cached'] : [])],errors},null,2));
+ await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

@@ -1,530 +1,387 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { beginImport, beginResume, type ImportProgressInfo } from "./lib/bookImport";
-import {
-  ensureBookSections,
-  estimateStorageUsage,
-  getActiveBook,
-  getChunk,
-  getCover,
-  getMeta,
-  getSections,
-  putMeta,
-  updateBook,
-  type BookRecord,
-  type ImportStage,
-  type SectionRecord,
-} from "./lib/db";
+import { runImport, runResume, type ImportProgressInfo } from "./lib/bookImport";
+import { ensureBookSections, estimateStorageUsage, getActiveBook, getChunk, getCover, getMeta, getSections, putMeta, updateBook, type BookRecord, type ImportStage, type SectionRecord, } from "./lib/db";
 import { findSectionForChunk } from "./lib/sectionLookup";
-import { estimateRemainingLabel } from "./lib/timeEstimate";
 import { isEvoSpeechPluginAvailable, isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
 import type { SpeechVoice } from "./lib/speechEngine";
 import { useVoices } from "./lib/useVoices";
-
+import { AppShell } from './components/AppShell';
+import { Library } from './components/Library';
+import { EvoPlayer } from './components/EvoPlayer';
+import { Sheet, type View, type ReaderTheme } from './components/DesignSystem';
+import { DEFAULT_UI, normalizeUI, readUICheckpoint, writeUICheckpoint, type UIPreferences } from './lib/uiPreferences';
 const MIN_RATE = 0.75;
 const MAX_RATE = 2;
-
 const STAGE_LABELS: Record<ImportStage, string> = {
-  opening: "Abriendo archivo…",
-  metadata: "Leyendo metadatos…",
-  structure: "Detectando estructura…",
-  extracting: "Extrayendo texto…",
-  worker: "Preparando lector…",
-  persisting: "Guardando…",
-  done: "Listo",
+    opening: "Abriendo archivo…",
+    metadata: "Leyendo metadatos…",
+    structure: "Detectando estructura…",
+    extracting: "Extrayendo texto…",
+    worker: "Preparando lector…",
+    persisting: "Guardando…",
+    done: "Listo",
 };
-
 interface LastSettings {
-  rate: number;
-  voiceURI: string | null;
+    rate: number;
+    voiceURI: string | null;
 }
-
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(1)} ${units[unit]}`;
+    if (bytes < 1024)
+        return `${bytes} B`;
+    const units = ["KB", "MB", "GB"];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value.toFixed(1)} ${units[unit]}`;
 }
-
 // Presentation-only cleanup of filename-derived titles (e.g. "Capitulo_2_La_normalidad_muriendo"
 // -> "La normalidad muriendo"). Never touches the stored value.
 function humanizeTitle(raw: string): string {
-  const spaced = raw.replace(/[_-]+/g, " ").trim();
-  const withoutPrefix = spaced.replace(/^(cap[ií]tulo|chapter|parte|part|secci[oó]n|section)\s+\d+\s*/i, "");
-  return withoutPrefix.trim() || raw;
+    const spaced = raw.replace(/[_-]+/g, " ").trim();
+    const withoutPrefix = spaced.replace(/^(cap[ií]tulo|chapter|parte|part|secci[oó]n|section)\s+\d+\s*/i, "");
+    return withoutPrefix.trim() || raw;
 }
-
 const VOICE_QUALITY_RANK: Record<string, number> = { premium: 0, enhanced: 1, default: 2 };
-
 // Display-only: groups by language, then surfaces the best-quality voices
 // first within each — never changes which voice.id is actually selected.
 function sortVoicesForDisplay(list: SpeechVoice[]): SpeechVoice[] {
-  return [...list].sort((a, b) => {
-    if (a.lang !== b.lang) return a.lang.localeCompare(b.lang);
-    const rankA = a.personal ? -1 : (VOICE_QUALITY_RANK[a.quality ?? "default"] ?? 2);
-    const rankB = b.personal ? -1 : (VOICE_QUALITY_RANK[b.quality ?? "default"] ?? 2);
-    if (rankA !== rankB) return rankA - rankB;
-    return a.name.localeCompare(b.name);
-  });
+    return [...list].sort((a, b) => {
+        if (a.lang !== b.lang)
+            return a.lang.localeCompare(b.lang);
+        const rankA = a.personal ? -1 : (VOICE_QUALITY_RANK[a.quality ?? "default"] ?? 2);
+        const rankB = b.personal ? -1 : (VOICE_QUALITY_RANK[b.quality ?? "default"] ?? 2);
+        if (rankA !== rankB)
+            return rankA - rankB;
+        return a.name.localeCompare(b.name);
+    });
 }
-
 // Only appends a quality/personal badge when the engine actually reported it
 // (NativeIosSpeechEngine) — Web Speech voices never get a fabricated label.
 function voiceLabel(v: SpeechVoice): string {
-  const base = `${v.name} (${v.lang})`;
-  if (v.personal) return `${base} · Personal`;
-  if (v.quality === "premium") return `${base} · Premium`;
-  if (v.quality === "enhanced") return `${base} · Enhanced`;
-  return base;
+    const base = `${v.name} (${v.lang})`;
+    if (v.personal)
+        return `${base} · Personal`;
+    if (v.quality === "premium")
+        return `${base} · Premium`;
+    if (v.quality === "enhanced")
+        return `${base} · Enhanced`;
+    return base;
 }
-
 // Diagnostic-only: counts voices by quality as actually reported by the
 // active engine — never inferred from name/identifier text.
 function summarizeVoicesByQuality(voices: SpeechVoice[]) {
-  const counts = { default: 0, enhanced: 0, premium: 0 };
-  let personal = 0;
-  for (const v of voices) {
-    counts[v.quality ?? "default"] += 1;
-    if (v.personal) personal += 1;
-  }
-  return { total: voices.length, ...counts, personal };
+    const counts = { default: 0, enhanced: 0, premium: 0 };
+    let personal = 0;
+    for (const v of voices) {
+        counts[v.quality ?? "default"] += 1;
+        if (v.personal)
+            personal += 1;
+    }
+    return { total: voices.length, ...counts, personal };
 }
-
-function IconSkipBack() {
-  return (
-    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-      <path d="M6 6v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M19 6 9 12l10 6V6Z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function IconSkipForward() {
-  return (
-    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-      <path d="M18 6v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M5 6l10 6-10 6V6Z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function IconPlay() {
-  return (
-    <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true">
-      <path d="M8 5v14l11-7-11-7Z" />
-    </svg>
-  );
-}
-
-function IconPause() {
-  return (
-    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">
-      <rect x="6" y="5" width="4.5" height="14" rx="1.5" />
-      <rect x="13.5" y="5" width="4.5" height="14" rx="1.5" />
-    </svg>
-  );
-}
-
-function IconStop() {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
-      <rect x="5" y="5" width="14" height="14" rx="2" />
-    </svg>
-  );
-}
-
-function IconChapters() {
-  return (
-    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-      <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconChevronRight() {
-  return (
-    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
-      <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconChevronDown() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
-      <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 export default function App() {
-  const [book, setBook] = useState<BookRecord | null>(null);
-  const [sections, setSections] = useState<SectionRecord[]>([]);
-  const [coverUrl, setCoverUrl] = useState<string | null>(null);
-  const [currentText, setCurrentText] = useState("");
-  const [index, setIndex] = useState(0);
-  const [status, setStatus] = useState<PlaybackStatus>("idle");
-  const [rate, setRate] = useState(1);
-  const [voiceURI, setVoiceURI] = useState<string | null>(null);
-  const [importProgress, setImportProgress] = useState<ImportProgressInfo | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
-  const [showChapters, setShowChapters] = useState(false);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [storageUsage, setStorageUsage] = useState<{ usage: number; quota: number } | undefined>(undefined);
-
-  const { voices, refreshVoices } = useVoices();
-  const autoPickedVoice = useRef(false);
-  const bookIdRef = useRef<string | null>(null);
-  const currentSectionIndexRef = useRef<number | null>(null);
-  const [ttsSupported] = useState(() => SpeechController.isSupported());
-  const [controller] = useState(
-    () =>
-      new SpeechController({
+    const [ui, setUI] = useState<UIPreferences>(() => readUICheckpoint() ?? DEFAULT_UI);
+    const [pendingFile, setPendingFile] = useState<File | null>(null);
+    const fileInput = useRef<HTMLInputElement>(null);
+    const restoreStarted = useRef(false);
+    const [book, setBook] = useState<BookRecord | null>(null);
+    const [sections, setSections] = useState<SectionRecord[]>([]);
+    const [coverUrl, setCoverUrl] = useState<string | null>(null);
+    const [currentText, setCurrentText] = useState("");
+    const [index, setIndex] = useState(0);
+    const [status, setStatus] = useState<PlaybackStatus>("idle");
+    const [rate, setRate] = useState(1);
+    const [voiceURI, setVoiceURI] = useState<string | null>(null);
+    const [importProgress, setImportProgress] = useState<ImportProgressInfo | null>(null);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [ready, setReady] = useState(false);
+    const [showChapters, setShowChapters] = useState(false);
+    const [showDiagnostics, setShowDiagnostics] = useState(false);
+    const [storageUsage, setStorageUsage] = useState<{
+        usage: number;
+        quota: number;
+    } | undefined>(undefined);
+    const { voices, refreshVoices } = useVoices();
+    const autoPickedVoice = useRef(false);
+    const bookIdRef = useRef<string | null>(null);
+    const currentSectionIndexRef = useRef<number | null>(null);
+    const [ttsSupported] = useState(() => SpeechController.isSupported());
+    const [controller] = useState(() => new SpeechController({
         onIndexChange: (i) => {
-          setIndex(i);
-          if (bookIdRef.current) void updateBook(bookIdRef.current, { currentChunk: i });
+            setIndex(i);
+            if (bookIdRef.current)
+                void updateBook(bookIdRef.current, { currentChunk: i });
         },
         onStatusChange: (s) => setStatus(s),
         onChunkText: (text) => setCurrentText(text ?? ""),
         getChunkText: async (i) => {
-          if (!bookIdRef.current) return undefined;
-          const chunk = await getChunk(bookIdRef.current, i);
-          return chunk?.text;
+            if (!bookIdRef.current)
+                return undefined;
+            const chunk = await getChunk(bookIdRef.current, i);
+            return chunk?.text;
         },
-      }),
-  );
-
-  const applyBook = useCallback((b: BookRecord) => {
-    bookIdRef.current = b.id;
-    setBook(b);
-  }, []);
-
-  // Restore (or resume importing) the active book, and last-used settings, on first load.
-  useEffect(() => {
-    (async () => {
-      const [existingBook, lastSettings] = await Promise.all([getActiveBook(), getMeta<LastSettings>("lastSettings")]);
-
-      if (existingBook) {
-        await ensureBookSections(existingBook.id); // backfill for Phase 1 books, no-op otherwise
-        applyBook(existingBook);
-        setRate(existingBook.rate);
-        setVoiceURI(existingBook.voiceURI);
-        if (existingBook.voiceURI) autoPickedVoice.current = true;
-        controller.setBook(existingBook.totalChunks, existingBook.currentChunk);
-
-        if (existingBook.importStatus === "importing") {
-          setImportProgress({
-            page: existingBook.importedUntil,
-            totalPages: existingBook.totalPages,
-            chunksSoFar: existingBook.totalChunks,
-            percent: existingBook.importProgress,
-            playable: existingBook.totalChunks > 0,
-          });
-          beginResume(existingBook, {
+    }));
+    const applyBook = useCallback((b: BookRecord) => {
+        bookIdRef.current = b.id;
+        setBook(b);
+    }, []);
+    // Restore (or resume importing) the active book, and last-used settings, on first load.
+    useEffect(() => {
+        if (restoreStarted.current)
+            return;
+        restoreStarted.current = true;
+        (async () => {
+            const storedUI = await getMeta('ui.v3');
+            setUI(readUICheckpoint() ?? normalizeUI(storedUI));
+            const [existingBook, lastSettings] = await Promise.all([getActiveBook(), getMeta<LastSettings>("lastSettings")]);
+            if (existingBook) {
+                await ensureBookSections(existingBook.id); // backfill for Phase 1 books, no-op otherwise
+                applyBook(existingBook);
+                setRate(existingBook.rate);
+                setVoiceURI(existingBook.voiceURI);
+                if (existingBook.voiceURI)
+                    autoPickedVoice.current = true;
+                controller.setBook(existingBook.totalChunks, existingBook.currentChunk);
+                if (existingBook.importStatus === "importing") {
+                    setImportProgress({
+                        page: existingBook.importedUntil,
+                        totalPages: existingBook.totalPages,
+                        chunksSoFar: existingBook.totalChunks,
+                        percent: existingBook.importProgress,
+                        playable: existingBook.totalChunks > 0,
+                    });
+                    void runResume(existingBook, {
+                        onProgress: (b, p) => {
+                            applyBook(b);
+                            controller.setTotalChunks(b.totalChunks);
+                            setImportProgress(p);
+                        },
+                        onDone: (b) => {
+                            applyBook(b);
+                            controller.setTotalChunks(b.totalChunks);
+                            setImportProgress(null);
+                        },
+                        onError: (message) => {
+                            setError(message);
+                            setImportProgress(null);
+                            setBook(previous => previous ? { ...previous, importStatus: 'error' } : previous);
+                        },
+                    }).catch(() => { });
+                }
+            }
+            else if (lastSettings) {
+                setRate(lastSettings.rate);
+                setVoiceURI(lastSettings.voiceURI);
+                if (lastSettings.voiceURI)
+                    autoPickedVoice.current = true;
+            }
+            setReady(true);
+        })();
+    }, [applyBook, controller]);
+    useEffect(() => {
+        if (ready) {
+            writeUICheckpoint(ui);
+            void putMeta('ui.v3', ui);
+        }
+    }, [ready, ui]);
+    const navigate = (view: View) => setUI(p => ({ ...p, view }));
+    // Sections list — refreshed when the known section count changes or import finishes.
+    useEffect(() => {
+        if (!book)
+            return;
+        let cancelled = false;
+        void getSections(book.id).then(result => { if (!cancelled)
+            setSections(result); });
+        return () => { cancelled = true; };
+    }, [book?.id, book?.totalSections, book?.importStatus]);
+    // Cover thumbnail.
+    useEffect(() => {
+        if (!book?.hasCover) {
+            setCoverUrl(null);
+            return;
+        }
+        setCoverUrl(null);
+        let cancelled = false;
+        let objectUrl: string | null = null;
+        void getCover(book.id).then((record) => {
+            if (cancelled || !record)
+                return;
+            objectUrl = URL.createObjectURL(record.blob);
+            setCoverUrl(objectUrl);
+        });
+        return () => {
+            cancelled = true;
+            if (objectUrl)
+                URL.revokeObjectURL(objectUrl);
+        };
+    }, [book?.id, book?.hasCover]);
+    // Default to a Spanish voice once voices are available, unless the user already chose one.
+    useEffect(() => {
+        if (autoPickedVoice.current || voices.length === 0)
+            return;
+        const spanish = voices.find((v) => v.lang.toLowerCase().startsWith("es"));
+        if (spanish) {
+            autoPickedVoice.current = true;
+            setVoiceURI(spanish.id);
+        }
+    }, [voices]);
+    useEffect(() => {
+        controller.setRate(rate);
+    }, [controller, rate]);
+    useEffect(() => {
+        const voice = voices.find((v) => v.id === voiceURI) ?? null;
+        controller.setVoice(voice);
+    }, [controller, voiceURI, voices]);
+    useEffect(() => {
+        if (!ready)
+            return;
+        void putMeta("lastSettings", { rate, voiceURI });
+        if (bookIdRef.current)
+            void updateBook(bookIdRef.current, { rate, voiceURI });
+    }, [ready, rate, voiceURI]);
+    const currentSection = useMemo(() => findSectionForChunk(sections, index), [sections, index]);
+    // Persist currentSection only when it actually changes (not on every chunk).
+    useEffect(() => {
+        if (!currentSection || !bookIdRef.current)
+            return;
+        if (currentSectionIndexRef.current === currentSection.index)
+            return;
+        currentSectionIndexRef.current = currentSection.index;
+        void updateBook(bookIdRef.current, { currentSection: currentSection.index });
+    }, [currentSection]);
+    const goToSection = useCallback((section: SectionRecord) => {
+        if (section.firstChunkIndex === null || section.firstChunkIndex === undefined)
+            return;
+        controller.goToChunk(section.firstChunkIndex);
+        setShowChapters(false);
+    }, [controller]);
+    const goToAdjacentSection = useCallback((delta: 1 | -1) => {
+        if (!currentSection)
+            return;
+        const pos = sections.findIndex((s) => s.index === currentSection.index);
+        const target = sections[pos + delta];
+        if (target)
+            goToSection(target);
+    }, [currentSection, sections, goToSection]);
+    const openDiagnostics = useCallback(() => {
+        void estimateStorageUsage().then(setStorageUsage);
+        setShowDiagnostics(true);
+    }, []);
+    const importFile = useCallback((file: File) => {
+        controller.pause();
+        currentSectionIndexRef.current = null;
+        setCurrentText("");
+        setError(null);
+        setBusy(true);
+        setImportProgress({ page: 0, totalPages: null, chunksSoFar: 0, percent: null, playable: false });
+        setSections([]);
+        setCoverUrl(null);
+        void runImport(file, {
+            onCreated: (b) => {
+                applyBook(b);
+                controller.setBook(0, 0);
+                setBusy(false);
+                setUI(p => ({ ...p, view: 'reader' }));
+            },
             onProgress: (b, p) => {
-              applyBook(b);
-              controller.setTotalChunks(b.totalChunks);
-              setImportProgress(p);
+                applyBook(b);
+                controller.setTotalChunks(b.totalChunks);
+                setImportProgress(p);
             },
             onDone: (b) => {
-              applyBook(b);
-              controller.setTotalChunks(b.totalChunks);
-              setImportProgress(null);
+                applyBook(b);
+                controller.setTotalChunks(b.totalChunks);
+                setImportProgress(null);
             },
             onError: (message) => {
-              setError(message);
-              setImportProgress(null);
+                setError(message);
+                setBusy(false);
+                setImportProgress(null);
+                setBook(previous => previous ? { ...previous, importStatus: 'error' } : previous);
             },
-          });
+        }).catch(() => { setBusy(false); setImportProgress(null); setError(previous => previous ?? 'No se pudo importar el libro. Inténtalo de nuevo.'); });
+    }, [applyBook, controller]);
+    const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file || busy || book?.importStatus === 'importing')
+            return;
+        if (!/\.(pdf|epub|docx|txt|md|markdown)$/i.test(file.name)) {
+            setError('Formato no soportado. Usa PDF, EPUB, DOCX, TXT o Markdown.');
+            return;
         }
-      } else if (lastSettings) {
-        setRate(lastSettings.rate);
-        setVoiceURI(lastSettings.voiceURI);
-        if (lastSettings.voiceURI) autoPickedVoice.current = true;
-      }
-
-      setReady(true);
-    })();
-  }, [applyBook, controller]);
-
-  // Sections list — refreshed when the known section count changes or import finishes.
-  useEffect(() => {
-    if (!book) return;
-    void getSections(book.id).then(setSections);
-  }, [book?.id, book?.totalSections, book?.importStatus]);
-
-  // Cover thumbnail.
-  useEffect(() => {
-    if (!book?.hasCover) {
-      setCoverUrl(null);
-      return;
-    }
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    void getCover(book.id).then((record) => {
-      if (cancelled || !record) return;
-      objectUrl = URL.createObjectURL(record.blob);
-      setCoverUrl(objectUrl);
-    });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+        if (book)
+            setPendingFile(file);
+        else
+            importFile(file);
     };
-  }, [book?.id, book?.hasCover]);
-
-  // Default to a Spanish voice once voices are available, unless the user already chose one.
-  useEffect(() => {
-    if (autoPickedVoice.current || voices.length === 0) return;
-    const spanish = voices.find((v) => v.lang.toLowerCase().startsWith("es"));
-    if (spanish) {
-      autoPickedVoice.current = true;
-      setVoiceURI(spanish.id);
-    }
-  }, [voices]);
-
-  useEffect(() => {
-    controller.setRate(rate);
-  }, [controller, rate]);
-
-  useEffect(() => {
-    const voice = voices.find((v) => v.id === voiceURI) ?? null;
-    controller.setVoice(voice);
-  }, [controller, voiceURI, voices]);
-
-  useEffect(() => {
-    if (!ready) return;
-    void putMeta("lastSettings", { rate, voiceURI });
-    if (bookIdRef.current) void updateBook(bookIdRef.current, { rate, voiceURI });
-  }, [ready, rate, voiceURI]);
-
-  const currentSection = useMemo(() => findSectionForChunk(sections, index), [sections, index]);
-
-  // Persist currentSection only when it actually changes (not on every chunk).
-  useEffect(() => {
-    if (!currentSection || !bookIdRef.current) return;
-    if (currentSectionIndexRef.current === currentSection.index) return;
-    currentSectionIndexRef.current = currentSection.index;
-    void updateBook(bookIdRef.current, { currentSection: currentSection.index });
-  }, [currentSection]);
-
-  const goToSection = useCallback(
-    (section: SectionRecord) => {
-      if (section.firstChunkIndex === null || section.firstChunkIndex === undefined) return;
-      controller.goToChunk(section.firstChunkIndex);
-      setShowChapters(false);
-    },
-    [controller],
-  );
-
-  const goToAdjacentSection = useCallback(
-    (delta: 1 | -1) => {
-      if (!currentSection) return;
-      const pos = sections.findIndex((s) => s.index === currentSection.index);
-      const target = sections[pos + delta];
-      if (target) goToSection(target);
-    },
-    [currentSection, sections, goToSection],
-  );
-
-  const openDiagnostics = useCallback(() => {
-    void estimateStorageUsage().then(setStorageUsage);
-    setShowDiagnostics(true);
-  }, []);
-
-  const handleFileChange = useCallback(
-    (e: ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file) return;
-
-      setError(null);
-      setBusy(true);
-      setImportProgress({ page: 0, totalPages: null, chunksSoFar: 0, percent: null, playable: false });
-      setSections([]);
-      setCoverUrl(null);
-
-      beginImport(file, {
-        onCreated: (b) => {
-          applyBook(b);
-          controller.setBook(0, 0);
-          setBusy(false);
-        },
-        onProgress: (b, p) => {
-          applyBook(b);
-          controller.setTotalChunks(b.totalChunks);
-          setImportProgress(p);
-        },
-        onDone: (b) => {
-          applyBook(b);
-          controller.setTotalChunks(b.totalChunks);
-          setImportProgress(null);
-        },
-        onError: (message) => {
-          setError(message);
-          setBusy(false);
-          setImportProgress(null);
-        },
-      });
-    },
-    [applyBook, controller],
-  );
-
-  if (!ready) {
-    return (
-      <div className="screen">
-        <h1 className="logo">EvoReader</h1>
-      </div>
-    );
-  }
-
-  return (
-    <div className="screen">
-      <h1 className="logo">EvoReader</h1>
-
-      {!book && (
-        <div className="empty-state">
-          <label className="load-button">
-            {busy ? "Cargando…" : "Cargar libro"}
-            <input type="file" accept=".pdf,.epub,.txt,.md,.docx" onChange={handleFileChange} disabled={busy} hidden />
-          </label>
-          {error && <p className="error">{error}</p>}
-        </div>
-      )}
-
-      {book && (
-        <Reader
-          book={book}
-          sections={sections}
-          currentSection={currentSection}
-          coverUrl={coverUrl}
-          index={index}
-          currentText={currentText}
-          status={status}
-          rate={rate}
-          voiceURI={voiceURI}
-          voices={voices}
-          onRefreshVoices={refreshVoices}
-          importProgress={importProgress}
-          busy={busy}
-          error={error}
-          onRateChange={setRate}
-          onVoiceChange={setVoiceURI}
-          onFileChange={handleFileChange}
-          controller={controller}
-          ttsSupported={ttsSupported}
-          showChapters={showChapters}
-          onOpenChapters={() => setShowChapters(true)}
-          onCloseChapters={() => setShowChapters(false)}
-          onSelectSection={goToSection}
-          onAdjacentSection={goToAdjacentSection}
-          showDiagnostics={showDiagnostics}
-          onOpenDiagnostics={openDiagnostics}
-          onCloseDiagnostics={() => setShowDiagnostics(false)}
-          storageUsage={storageUsage}
-        />
-      )}
-    </div>
-  );
+    const importBusy = busy || book?.importStatus === 'importing';
+    return (<AppShell view={ui.view} onNavigate={navigate} hasBook={!!book}>
+      <input ref={fileInput} className="sr-only" tabIndex={-1} aria-label="Archivo del libro" type="file" accept=".pdf,.epub,.txt,.md,.markdown,.docx" onChange={handleFileChange} disabled={importBusy || !ready}/>
+      {!ready && <p role="status">Recuperando tu lectura…</p>}
+      {error && <p className="error global-notice" role="alert">{error}</p>}
+      {ui.view === 'library' && <Library book={book} index={index} coverUrl={coverUrl} chapter={currentSection?.title} onRead={() => navigate('reader')} onListen={() => { navigate('reader'); controller.play(); }} onImport={() => fileInput.current?.click()} busy={importBusy || !ready}/>}
+      {ui.view === 'activity' && <section className="page-panel"><p className="eyebrow">TU ESPACIO PERSONAL</p><h1>Tu lectura.</h1><p>Cada página cuenta. Disfruta el camino.</p><div className="reading-stats"><div><strong>{book ? '01' : '00'}</strong><span>Libro disponible</span></div><div><strong>{book ? Math.round(index / Math.max(book.totalChunks - 1, 1) * 100) : 0}%</strong><span>Avance actual</span></div><div><strong>{book?.totalSections ?? 0}</strong><span>Secciones del libro</span></div></div><div className="quiet-card"><h2>Tu tiempo, sin prisa.</h2><p>La lectura y la escucha comparten tu posición guardada. El historial de horas llegará con las sesiones de lectura.</p>{book && <button className="primary-button" onClick={() => navigate('reader')}>Volver a mi libro →</button>}</div></section>}
+      {ui.view === 'settings' && <section className="page-panel"><p className="eyebrow">A TU MANERA</p><h1>Ajustes.</h1><p>Un espacio cómodo para quedarte un capítulo más.</p><div className="quiet-card"><h2>Apariencia del lector</h2><div className="theme-picker">{(['paper', 'sepia', 'dark', 'oled'] as ReaderTheme[]).map((theme, i) => <button key={theme} data-theme={theme} aria-pressed={ui.theme === theme} onClick={() => setUI(p => ({ ...p, theme }))}>{['Blanco', 'Marfil', 'Oscuro', 'OLED'][i]}</button>)}</div><label className="setting">Tamaño del texto · {ui.fontSize}px<input type="range" min="18" max="32" value={ui.fontSize} onChange={e => setUI(p => ({ ...p, fontSize: Number(e.target.value) }))}/></label></div><div className="quiet-card"><h2>Tu biblioteca es privada</h2><p>Los archivos y tu posición se guardan en este dispositivo. Sin cuentas, suscripciones ni servicios de pago añadidos.</p><p className="fine-print">Conserva tus archivos originales: el sistema puede liberar datos del navegador si falta espacio.</p></div></section>}
+      {ui.view === 'reader' && !book && <section className="page-panel"><h1>Abre tu próxima historia.</h1><p>Tu lector estará aquí cuando importes un libro.</p><button className="primary-button" onClick={() => fileInput.current?.click()} disabled={!ready || importBusy}>Importar libro</button></section>}
+      {pendingFile && <Sheet title="Cambiar de libro" onClose={() => setPendingFile(null)}><p>Esta versión conserva un solo libro. Importar <strong>{pendingFile.name}</strong> eliminará el libro actual y su progreso de este dispositivo, incluso si la nueva importación falla. Tu archivo original no se modifica.</p><div className="dialog-actions"><button className="subtle-button" onClick={() => setPendingFile(null)}>Conservar mi libro</button><button className="primary-button" onClick={() => { const file = pendingFile; setPendingFile(null); importFile(file); }}>Reemplazar e importar</button></div></Sheet>}
+      {book && (<Reader view={ui.view} theme={ui.theme} fontSize={ui.fontSize} book={book} sections={sections} currentSection={currentSection} coverUrl={coverUrl} index={index} currentText={currentText} status={status} rate={rate} voiceURI={voiceURI} voices={voices} onRefreshVoices={refreshVoices} importProgress={importProgress} busy={busy} error={error} onRateChange={setRate} onVoiceChange={setVoiceURI} onFileChange={handleFileChange} controller={controller} ttsSupported={ttsSupported} showChapters={showChapters} onOpenChapters={() => setShowChapters(true)} onCloseChapters={() => setShowChapters(false)} onSelectSection={goToSection} onAdjacentSection={goToAdjacentSection} showDiagnostics={showDiagnostics} onOpenDiagnostics={openDiagnostics} onCloseDiagnostics={() => setShowDiagnostics(false)} storageUsage={storageUsage}/>)}
+    </AppShell>);
 }
-
 interface ReaderProps {
-  book: BookRecord;
-  sections: SectionRecord[];
-  currentSection: SectionRecord | undefined;
-  coverUrl: string | null;
-  index: number;
-  currentText: string;
-  status: PlaybackStatus;
-  rate: number;
-  voiceURI: string | null;
-  voices: SpeechVoice[];
-  onRefreshVoices: () => void;
-  importProgress: ImportProgressInfo | null;
-  busy: boolean;
-  error: string | null;
-  onRateChange: (rate: number) => void;
-  onVoiceChange: (voiceURI: string) => void;
-  onFileChange: (e: ChangeEvent<HTMLInputElement>) => void;
-  controller: SpeechController;
-  ttsSupported: boolean;
-  showChapters: boolean;
-  onOpenChapters: () => void;
-  onCloseChapters: () => void;
-  onSelectSection: (section: SectionRecord) => void;
-  onAdjacentSection: (delta: 1 | -1) => void;
-  showDiagnostics: boolean;
-  onOpenDiagnostics: () => void;
-  onCloseDiagnostics: () => void;
-  storageUsage: { usage: number; quota: number } | undefined;
+    view: View;
+    theme: ReaderTheme;
+    fontSize: number;
+    book: BookRecord;
+    sections: SectionRecord[];
+    currentSection: SectionRecord | undefined;
+    coverUrl: string | null;
+    index: number;
+    currentText: string;
+    status: PlaybackStatus;
+    rate: number;
+    voiceURI: string | null;
+    voices: SpeechVoice[];
+    onRefreshVoices: () => void;
+    importProgress: ImportProgressInfo | null;
+    busy: boolean;
+    error: string | null;
+    onRateChange: (rate: number) => void;
+    onVoiceChange: (voiceURI: string) => void;
+    onFileChange: (e: ChangeEvent<HTMLInputElement>) => void;
+    controller: SpeechController;
+    ttsSupported: boolean;
+    showChapters: boolean;
+    onOpenChapters: () => void;
+    onCloseChapters: () => void;
+    onSelectSection: (section: SectionRecord) => void;
+    onAdjacentSection: (delta: 1 | -1) => void;
+    showDiagnostics: boolean;
+    onOpenDiagnostics: () => void;
+    onCloseDiagnostics: () => void;
+    storageUsage: {
+        usage: number;
+        quota: number;
+    } | undefined;
 }
-
-function Reader({
-  book,
-  sections,
-  currentSection,
-  coverUrl,
-  index,
-  currentText,
-  status,
-  rate,
-  voiceURI,
-  voices,
-  onRefreshVoices,
-  importProgress,
-  busy,
-  error,
-  onRateChange,
-  onVoiceChange,
-  onFileChange,
-  controller,
-  ttsSupported,
-  showChapters,
-  onOpenChapters,
-  onCloseChapters,
-  onSelectSection,
-  onAdjacentSection,
-  showDiagnostics,
-  onOpenDiagnostics,
-  onCloseDiagnostics,
-  storageUsage,
-}: ReaderProps) {
-  const total = book.totalChunks;
-  const bookProgress = total > 1 ? Math.round((index / (total - 1)) * 100) : 0;
-  const importing = book.importStatus === "importing";
-
-  const sectionProgress = useMemo(() => {
-    if (!currentSection || currentSection.firstChunkIndex === null || currentSection.lastChunkIndex === null) return null;
-    const span = Math.max(currentSection.lastChunkIndex - currentSection.firstChunkIndex, 1);
-    return Math.round(((index - currentSection.firstChunkIndex) / span) * 100);
-  }, [currentSection, index]);
-
-  const remainingLabel = useMemo(
-    () => estimateRemainingLabel(book.wordCount, book.totalChunks, index, rate),
-    [book.wordCount, book.totalChunks, index, rate],
-  );
-
-  const isNativeEngine = isNativeIosBridgeAvailable();
-  const voiceQualitySummary = useMemo(() => summarizeVoicesByQuality(voices), [voices]);
-  const spanishVoices = useMemo(
-    () => (isNativeEngine ? voices.filter((v) => v.lang.toLowerCase().startsWith("es")) : []),
-    [isNativeEngine, voices],
-  );
-
-  const chapterEyebrow = currentSection?.title ? "Capítulo actual" : "Índice";
-  const chapterHeadline =
-    currentSection?.title ?? (sections.length > 0 ? `${sections.length} secciones` : "Sin capítulos");
-
-  return (
-    <div className="reader">
+function Reader({ view, theme, fontSize, book, sections, currentSection, coverUrl, index, currentText, status, rate, voiceURI, voices, onRefreshVoices, importProgress, busy, error, onRateChange, onVoiceChange, onFileChange, controller, ttsSupported, showChapters, onOpenChapters, onCloseChapters, onSelectSection, onAdjacentSection, showDiagnostics, onOpenDiagnostics, onCloseDiagnostics, storageUsage, }: ReaderProps) {
+    const [focused, setFocused] = useState(false);
+    const total = book.totalChunks;
+    const bookProgress = total > 1 ? Math.round((index / (total - 1)) * 100) : 0;
+    const importing = book.importStatus === "importing";
+    const isNativeEngine = isNativeIosBridgeAvailable();
+    const voiceQualitySummary = useMemo(() => summarizeVoicesByQuality(voices), [voices]);
+    const spanishVoices = useMemo(() => (isNativeEngine ? voices.filter((v) => v.lang.toLowerCase().startsWith("es")) : []), [isNativeEngine, voices]);
+    return (<div className={`reader ${focused ? 'focus-mode' : ''}`}>
+      {view === 'reader' && <div className="reader-canvas" data-theme={theme} style={{ '--reader-size': `${fontSize}px` } as import('react').CSSProperties}>
+      <div className="reader-tools"><button className="subtle-button" onClick={onOpenChapters}>☰ Capítulos</button><button className="subtle-button" aria-pressed={focused} onClick={() => setFocused(!focused)}>{focused ? 'Mostrar controles' : 'Modo enfoque'}</button></div>
       <header className="book-header">
-        {coverUrl && <img className="cover-thumb" src={coverUrl} alt="" />}
+        {coverUrl && <img className="cover-thumb" src={coverUrl} alt=""/>}
         <div className="book-header-text">
           <h2 className="title">{humanizeTitle(book.title)}</h2>
           {book.author && <p className="author">{book.author}</p>}
@@ -533,23 +390,21 @@ function Reader({
       </header>
 
       <div className="header-progress-track" aria-hidden="true">
-        <div className="header-progress-fill" style={{ width: `${bookProgress}%` }} />
+        <div className="header-progress-fill" style={{ width: `${bookProgress}%` }}/>
       </div>
 
       <section className="reading-stage">
-        {importProgress && (
-          <div className="import-progress">
+        {importProgress && (<div className="import-progress">
             <p className="import-progress-label">
               Procesando {book.title}… {STAGE_LABELS[book.importStage]}
               {importProgress.totalPages ? ` · ${book.format === "pdf" ? "Página" : "Sección"} ${importProgress.page} de ${importProgress.totalPages}` : ""}
               {importProgress.percent !== null ? ` · ${importProgress.percent}%` : ""}
             </p>
             <div className="progress-track">
-              <div className="progress-fill" style={{ width: `${importProgress.percent ?? 0}%` }} />
+              <div className="progress-fill" style={{ width: `${importProgress.percent ?? 0}%` }}/>
             </div>
             {importProgress.playable && <p className="notice">Ya puedes comenzar a escuchar mientras terminamos de procesarlo.</p>}
-          </div>
-        )}
+          </div>)}
 
         <div className={`current-text${status === "playing" ? " is-playing" : ""}`}>
           {currentText || (importing ? "Preparando el texto…" : "")}
@@ -557,93 +412,37 @@ function Reader({
 
         {status === "buffering" && <p className="notice">Cargando…</p>}
 
-        {!ttsSupported && (
-          <p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>
-        )}
+        {!ttsSupported && (<p className="notice">Este navegador no soporta lectura en voz alta. Puedes seguir el texto igualmente.</p>)}
       </section>
 
-      <section className="player">
-        <button type="button" className="player-chapters-trigger" onClick={onOpenChapters} disabled={sections.length === 0}>
-          <span className="player-chapters-icon">
-            <IconChapters />
-          </span>
-          <span className="player-chapters-text">
-            <span className="player-chapters-eyebrow">{chapterEyebrow}</span>
-            <span className="player-chapters-title">{chapterHeadline}</span>
-          </span>
-          <IconChevronRight />
-        </button>
+      <div className="reader-pagination"><button className="subtle-button" disabled={index <= 0} onClick={() => controller.skip(-1)}>← Anterior</button><span>{total ? index + 1 : 0} / {total} fragmentos</span><button className="subtle-button" disabled={index >= total - 1} onClick={() => controller.skip(1)}>Siguiente →</button></div>
+      </div>}
+      <EvoPlayer key={book.id} book={book} index={index} coverUrl={coverUrl} section={currentSection} status={status} controller={controller} supported={ttsSupported} rate={rate} onRate={onRateChange} voiceURI={voiceURI} voices={sortVoicesForDisplay(voices)} onVoice={onVoiceChange} onChapters={onOpenChapters}/>
 
-        <div className="player-progress">
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${sectionProgress ?? bookProgress}%` }} />
-          </div>
-          <div className="player-progress-meta">
-            <span>{sectionProgress ?? bookProgress}% del capítulo</span>
-            <span>
-              Libro {bookProgress}%{remainingLabel ? ` · ${remainingLabel} restantes` : ""}
-            </span>
-          </div>
-        </div>
-
-        <div className="transport">
-          <button className="transport-button" aria-label="Retroceder" onClick={() => controller.skip(-1)} disabled={index <= 0}>
-            <IconSkipBack />
-          </button>
-
-          <button
-            className="play-button"
-            aria-label={status === "playing" ? "Pausar" : "Reproducir"}
-            onClick={() => (status === "playing" || status === "buffering" ? controller.pause() : controller.play())}
-            disabled={!ttsSupported || total === 0}
-          >
-            {status === "playing" || status === "buffering" ? <IconPause /> : <IconPlay />}
-          </button>
-
-          <button className="transport-button" aria-label="Adelantar" onClick={() => controller.skip(1)} disabled={index >= total - 1}>
-            <IconSkipForward />
-          </button>
-        </div>
-
-        <button className="stop-button" onClick={() => controller.stop()}>
-          <IconStop />
-          <span>Detener</span>
-        </button>
-      </section>
-
-      <details className="more-panel">
+      {view === 'settings' && <details className="more-panel" open>
         <summary>
           <span>Ajustes y opciones</span>
-          <IconChevronDown />
+
         </summary>
         <div className="more-panel-body">
           <div className="settings">
             <label className="setting">
               <span>Velocidad {rate.toFixed(2)}x</span>
-              <input
-                type="range"
-                min={MIN_RATE}
-                max={MAX_RATE}
-                step={0.05}
-                value={rate}
-                onChange={(e) => onRateChange(Number(e.target.value))}
-              />
+              <input type="range" min={MIN_RATE} max={MAX_RATE} step={0.05} value={rate} onChange={(e) => onRateChange(Number(e.target.value))}/>
             </label>
 
             <label className="setting">
               <span>Voz</span>
               <select value={voiceURI ?? ""} onChange={(e) => onVoiceChange(e.target.value)}>
                 {voiceURI === null && <option value="">Predeterminada</option>}
-                {sortVoicesForDisplay(voices).map((v) => (
-                  <option key={v.id} value={v.id}>
+                {sortVoicesForDisplay(voices).map((v) => (<option key={v.id} value={v.id}>
                     {voiceLabel(v)}
-                  </option>
-                ))}
+                  </option>))}
               </select>
             </label>
           </div>
 
-          <div className="voice-diagnostics">
+          <details className="voice-diagnostics"><summary>Diagnóstico avanzado de voz</summary>
             <div className="voice-diagnostics-header">
               <span className="voice-diagnostics-title">Diagnóstico de voz</span>
               <button type="button" className="text-link" onClick={onRefreshVoices}>
@@ -667,66 +466,46 @@ function Reader({
               <dd>{voiceQualitySummary.personal}</dd>
             </dl>
 
-            {isNativeEngine && (
-              <div className="voice-diagnostics-es">
+            {isNativeEngine && (<div className="voice-diagnostics-es">
                 <p className="diagnostics-voice-title">Voces es-* ({spanishVoices.length})</p>
-                {spanishVoices.map((v) => (
-                  <div key={v.id} className="voice-diagnostics-item">
+                {spanishVoices.map((v) => (<div key={v.id} className="voice-diagnostics-item">
                     <p className="diagnostics-voice-line">{v.name}</p>
                     <p className="diagnostics-voice-line">{v.lang}</p>
                     <p className="diagnostics-voice-line">{v.quality ?? "default"}</p>
                     <p className="diagnostics-voice-line">{v.id}</p>
                     <p className="diagnostics-voice-line">personal: {v.personal ? "true" : "false"}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  </div>))}
+              </div>)}
+          </details>
 
           {error && <p className="error">{error}</p>}
 
           <label className="load-button secondary">
             {busy ? "Cargando…" : "Cargar otro libro"}
-            <input type="file" accept=".pdf,.epub,.txt,.md,.docx" onChange={onFileChange} disabled={busy || importing} hidden />
+            <input type="file" accept=".pdf,.epub,.txt,.md,.docx" onChange={onFileChange} disabled={busy || importing} hidden/>
           </label>
 
           <button className="text-link" onClick={onOpenDiagnostics}>
             Diagnóstico
           </button>
         </div>
-      </details>
+      </details>}
 
-      {showChapters && (
-        <ChaptersPanel
-          sections={sections}
-          currentSection={currentSection}
-          onClose={onCloseChapters}
-          onSelect={onSelectSection}
-          onAdjacent={onAdjacentSection}
-        />
-      )}
+      {showChapters && (<ChaptersPanel sections={sections} currentSection={currentSection} onClose={onCloseChapters} onSelect={onSelectSection} onAdjacent={onAdjacentSection}/>)}
 
-      {showDiagnostics && (
-        <DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} onClose={onCloseDiagnostics} />
-      )}
-    </div>
-  );
+      {showDiagnostics && (<DiagnosticsPanel book={book} sections={sections} storageUsage={storageUsage} onClose={onCloseDiagnostics}/>)}
+    </div>);
 }
-
 interface ChaptersPanelProps {
-  sections: SectionRecord[];
-  currentSection: SectionRecord | undefined;
-  onClose: () => void;
-  onSelect: (section: SectionRecord) => void;
-  onAdjacent: (delta: 1 | -1) => void;
+    sections: SectionRecord[];
+    currentSection: SectionRecord | undefined;
+    onClose: () => void;
+    onSelect: (section: SectionRecord) => void;
+    onAdjacent: (delta: 1 | -1) => void;
 }
-
 function ChaptersPanel({ sections, currentSection, onClose, onSelect, onAdjacent }: ChaptersPanelProps) {
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+    return (<Sheet title="Capítulos" onClose={onClose}>
         <div className="sheet-header">
-          <h3>Capítulos</h3>
           <div className="sheet-header-actions">
             <button className="icon-button small" aria-label="Capítulo anterior" onClick={() => onAdjacent(-1)}>
               ⏮
@@ -743,33 +522,27 @@ function ChaptersPanel({ sections, currentSection, onClose, onSelect, onAdjacent
           {sections.map((s) => {
             const isCurrent = currentSection?.index === s.index;
             const isRead = !isCurrent && currentSection !== undefined && s.index < currentSection.index;
-            return (
-              <button key={s.index} className={`sheet-item${isCurrent ? " current" : ""}`} onClick={() => onSelect(s)}>
+            return (<button key={s.index} className={`sheet-item${isCurrent ? " current" : ""}`} onClick={() => onSelect(s)}>
                 <span className="sheet-item-marker">{isCurrent ? "▶" : isRead ? "✓" : ""}</span>
                 <span className="sheet-item-title">{s.title ?? "Libro completo"}</span>
-              </button>
-            );
-          })}
+              </button>);
+        })}
         </div>
-      </div>
-    </div>
-  );
+    </Sheet>);
 }
-
 interface DiagnosticsPanelProps {
-  book: BookRecord;
-  sections: SectionRecord[];
-  storageUsage: { usage: number; quota: number } | undefined;
-  onClose: () => void;
+    book: BookRecord;
+    sections: SectionRecord[];
+    storageUsage: {
+        usage: number;
+        quota: number;
+    } | undefined;
+    onClose: () => void;
 }
-
 function DiagnosticsPanel({ book, sections, storageUsage, onClose }: DiagnosticsPanelProps) {
-  const progress = book.totalChunks > 1 ? Math.round((book.currentChunk / (book.totalChunks - 1)) * 100) : 0;
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+    const progress = book.totalChunks > 1 ? Math.round((book.currentChunk / (book.totalChunks - 1)) * 100) : 0;
+    return (<Sheet title="Diagnóstico del libro" onClose={onClose}>
         <div className="sheet-header">
-          <h3>Diagnóstico del libro</h3>
           <button className="icon-button small" aria-label="Cerrar" onClick={onClose}>
             ✕
           </button>
@@ -779,12 +552,10 @@ function DiagnosticsPanel({ book, sections, storageUsage, onClose }: Diagnostics
           <dd>{book.format.toUpperCase()}</dd>
           <dt>Tamaño</dt>
           <dd>{formatBytes(book.size)}</dd>
-          {book.format === "pdf" && (
-            <>
+          {book.format === "pdf" && (<>
               <dt>Páginas</dt>
               <dd>{book.totalPages ?? "—"}</dd>
-            </>
-          )}
+            </>)}
           <dt>Secciones</dt>
           <dd>{sections.length}</dd>
           <dt>Chunks</dt>
@@ -795,16 +566,12 @@ function DiagnosticsPanel({ book, sections, storageUsage, onClose }: Diagnostics
           <dd>{book.wordCount.toLocaleString("es")} palabras</dd>
           <dt>Progreso</dt>
           <dd>{progress}%</dd>
-          {storageUsage && (
-            <>
+          {storageUsage && (<>
               <dt>Almacenamiento</dt>
               <dd>
                 ~{formatBytes(storageUsage.usage)} de {formatBytes(storageUsage.quota)}
               </dd>
-            </>
-          )}
+            </>)}
         </dl>
-      </div>
-    </div>
-  );
+    </Sheet>);
 }

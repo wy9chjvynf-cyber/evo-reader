@@ -10,6 +10,7 @@
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview",
+    "check:budgets": "node scripts/check-budgets.mjs",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {
