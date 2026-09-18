@@ -81,15 +81,22 @@ describe("bookImport — txt/md", () => {
     expect(sections.map((s) => s.title)).toEqual(["TIERRA", "Capítulo 1"]);
   });
 
-  it("keeps only one active book: a new import clears the previous one's chunks and sections", async () => {
+  it("keeps previous books, chunks and sections after a new import", async () => {
     const first = await runImport(makeTextFile("uno.txt", "Contenido del primer libro, con suficiente texto."));
     const second = await runImport(makeTextFile("dos.txt", "Contenido del segundo libro, con suficiente texto."));
 
-    expect(await getBook(first.id)).toBeUndefined();
-    expect((await getChunkRange(first.id, 0, 10)).length).toBe(0);
-    expect((await getSections(first.id)).length).toBe(0);
+    expect(await getBook(first.id)).toBeDefined();
+    expect((await getChunkRange(first.id, 0, 10)).length).toBeGreaterThan(0);
+    expect((await getSections(first.id)).length).toBeGreaterThan(0);
     expect((await getBook(second.id))?.importStatus).toBe("done");
   });
+});
+
+it("a failed import preserves the existing library", async () => {
+  const first = await runImport(makeTextFile('safe.txt', 'Este contenido debe conservarse.'));
+  await expect(runImport(makeTextFile('empty.txt', ''))).rejects.toThrow();
+  expect((await getBook(first.id))?.importStatus).toBe('done');
+  expect((await getChunkRange(first.id,0,10))[0].text).toContain('conservarse');
 });
 
 describe("bookImport — pdf", () => {

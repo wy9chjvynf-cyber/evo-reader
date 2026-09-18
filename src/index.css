@@ -15,3 +15,5 @@
 .app-shell:has(.focus-mode) .sidebar,.app-shell:has(.focus-mode) .mini-player{display:none}
 .app-shell:has(.focus-mode) main{margin:0 auto;max-width:980px;padding-bottom:32px}
 @media(max-width:700px){.app-shell:has(.focus-mode) main{padding-top:env(safe-area-inset-top)}}
+
+.library-options{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}.library-options label,.collection-field{display:flex;flex-direction:column;gap:6px;font-size:11px;color:var(--muted)}.library-options select,.collection-field input{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px;color:var(--text);max-width:100%;min-width:0}.library-card{min-width:0}.library-card .book-card{width:100%}.favorite-button{background:transparent;font-size:12px;padding:8px 0;margin:8px 0}.favorite-button[aria-pressed=true]{color:#956314}.collection-field input{width:100%}.filter-row{flex-wrap:wrap}

@@ -1,5 +1,4 @@
 import {
-  clearAllBooks,
   deleteFileBlob,
   getBook,
   getFileBlob,
@@ -78,7 +77,7 @@ async function createBookRecord(file: File, format: BookFormat): Promise<BookRec
     updatedAt: now,
     lastOpenedAt: now,
   };
-  await putBook(book);
+  if (!await putBook(book)) throw new Error("No fue posible de guardar el libro. Revisa el espacio disponible.");
   return book;
 }
 
@@ -280,7 +279,6 @@ export async function runImport(file: File, callbacks: ImportCallbacks = {}): Pr
   const format = detectFormat(file.name);
   if (!format) throw new Error("Formato no soportado. Usa PDF, EPUB, DOCX, TXT o MD.");
 
-  await clearAllBooks(); // EvoReader keeps a single active book at a time
   const book = await createBookRecord(file, format);
   callbacks.onCreated?.(book);
 

@@ -167,3 +167,20 @@ describe("SpeechController", () => {
     expect(statuses.at(-1)).toBe("idle");
   });
 });
+
+it('discards delayed text and cache entries from the previous book', async () => {
+  installFakeSpeechSynthesis();
+  let finishOld!: (text: string) => void;
+  const shown = vi.fn();
+  const getText = vi.fn().mockImplementationOnce(() => new Promise<string>(r => {finishOld=r;})).mockResolvedValue('new book');
+  const controller = new SpeechController({onIndexChange:()=>{},onStatusChange:()=>{},onChunkText:shown,getChunkText:getText});
+  controller.setBook(2);
+  controller.setBook(2);
+  await new Promise(r=>setTimeout(r,0));
+  finishOld('old book');
+  await new Promise(r=>setTimeout(r,0));
+  controller.goToChunk(0);
+  await new Promise(r=>setTimeout(r,0));
+  expect(shown).not.toHaveBeenCalledWith('old book');
+  expect(shown).toHaveBeenLastCalledWith('new book');
+});

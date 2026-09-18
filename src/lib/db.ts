@@ -6,6 +6,8 @@ export type BookFormat = "pdf" | "txt" | "md" | "docx" | "epub";
 export type ImportStage = "opening" | "metadata" | "structure" | "extracting" | "worker" | "persisting" | "done";
 
 export interface BookRecord {
+  favorite?: boolean;
+  collection?: string;
   id: string;
   title: string;
   author: string | null;
@@ -160,8 +162,12 @@ export const deleteBook = (id: string) => safely(async () => (await getDB()).del
 export const getAllBooks = async (): Promise<BookRecord[]> =>
   ((await safely(async () => (await getDB()).getAll("books"))) ?? []).map(withBookDefaults);
 
-/** EvoReader keeps a single active book at a time; this is the one, if any. */
-export const getActiveBook = async (): Promise<BookRecord | undefined> => (await getAllBooks())[0];
+/** Restores explicit selection; legacy libraries fall back to the most recent book. */
+export const getActiveBook = async (): Promise<BookRecord | undefined> => {
+  const books = await getAllBooks();
+  const activeId = await getMeta<string>('activeBookId');
+  return books.find(b => b.importStatus === 'importing') ?? books.find(b => b.id === activeId) ?? books.sort((a,b) => b.lastOpenedAt - a.lastOpenedAt)[0];
+};
 
 export async function updateBook(id: string, patch: Partial<BookRecord>): Promise<BookRecord | undefined> {
   return safely(async () => {
@@ -330,7 +336,7 @@ export async function deleteBookCascade(bookId: string): Promise<void> {
   ]);
 }
 
-/** EvoReader keeps one active book; call before starting a new import. */
+/** Test/reset helper. Never called by normal imports. */
 export async function clearAllBooks(): Promise<void> {
   const books = await getAllBooks();
   await Promise.all(books.map((b) => deleteBookCascade(b.id)));

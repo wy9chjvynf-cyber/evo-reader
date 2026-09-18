@@ -45,6 +45,7 @@ export class SpeechController {
   private voice: SpeechVoice | null = null;
   private status: PlaybackStatus = "idle";
   private sequence = 0;
+  private bookGeneration = 0;
   private cache = new Map<number, string>();
   private deps: SpeechControllerDeps;
   private engine: SpeechEngine;
@@ -60,6 +61,7 @@ export class SpeechController {
 
   /** Loads a (possibly still-importing) book: totalChunks is the best-known count so far. */
   setBook(totalChunks: number, startIndex = 0) {
+    this.bookGeneration += 1;
     this.sequence += 1;
     this.engine.cancel();
     this.totalChunks = totalChunks;
@@ -146,7 +148,9 @@ export class SpeechController {
   private async getChunkCached(index: number): Promise<string | undefined> {
     const cached = this.cache.get(index);
     if (cached !== undefined) return cached;
+    const generation = this.bookGeneration;
     const text = await this.deps.getChunkText(index);
+    if (generation !== this.bookGeneration) return undefined;
     if (text !== undefined) {
       this.cache.set(index, text);
       if (this.cache.size > CACHE_WINDOW) {
@@ -159,9 +163,10 @@ export class SpeechController {
 
   /** Fetches and reports the text for the current index without speaking (idle/paused display). */
   private async showCurrent() {
+    const generation = this.bookGeneration;
     const idx = this.index;
     const text = await this.getChunkCached(idx);
-    if (this.index !== idx) return; // moved on meanwhile
+    if (this.index !== idx || generation !== this.bookGeneration) return; // moved on meanwhile
     this.deps.onChunkText(text);
   }
 

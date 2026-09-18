@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { runImport, runResume, type ImportProgressInfo } from "./lib/bookImport";
-import { ensureBookSections, estimateStorageUsage, getActiveBook, getChunk, getCover, getMeta, getSections, putMeta, updateBook, type BookRecord, type ImportStage, type SectionRecord, } from "./lib/db";
+import { ensureBookSections, estimateStorageUsage, getActiveBook, getAllBooks, getBook, getChunk, getCover, getMeta, getSections, putMeta, updateBook, type BookRecord, type ImportStage, type SectionRecord, } from "./lib/db";
 import { findSectionForChunk } from "./lib/sectionLookup";
 import { isEvoSpeechPluginAvailable, isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
@@ -85,7 +85,8 @@ function summarizeVoicesByQuality(voices: SpeechVoice[]) {
 }
 export default function App() {
     const [ui, setUI] = useState<UIPreferences>(() => readUICheckpoint() ?? DEFAULT_UI);
-    const [pendingFile, setPendingFile] = useState<File | null>(null);
+    const [books, setBooks] = useState<BookRecord[]>([]);
+    const switching = useRef(false);
     const fileInput = useRef<HTMLInputElement>(null);
     const restoreStarted = useRef(false);
     const [book, setBook] = useState<BookRecord | null>(null);
@@ -129,6 +130,7 @@ export default function App() {
     const applyBook = useCallback((b: BookRecord) => {
         bookIdRef.current = b.id;
         setBook(b);
+        setBooks(previous => [...previous.filter(item => item.id !== b.id), b]);
     }, []);
     // Restore (or resume importing) the active book, and last-used settings, on first load.
     useEffect(() => {
@@ -139,6 +141,7 @@ export default function App() {
             const storedUI = await getMeta('ui.v3');
             setUI(readUICheckpoint() ?? normalizeUI(storedUI));
             const [existingBook, lastSettings] = await Promise.all([getActiveBook(), getMeta<LastSettings>("lastSettings")]);
+            setBooks(await getAllBooks());
             if (existingBook) {
                 await ensureBookSections(existingBook.id); // backfill for Phase 1 books, no-op otherwise
                 applyBook(existingBook);
@@ -170,6 +173,7 @@ export default function App() {
                             setError(message);
                             setImportProgress(null);
                             setBook(previous => previous ? { ...previous, importStatus: 'error' } : previous);
+                void getAllBooks().then(setBooks);
                         },
                     }).catch(() => { });
                 }
@@ -284,6 +288,7 @@ export default function App() {
         void runImport(file, {
             onCreated: (b) => {
                 applyBook(b);
+                void putMeta("activeBookId", b.id);
                 controller.setBook(0, 0);
                 setBusy(false);
                 setUI(p => ({ ...p, view: 'reader' }));
@@ -303,6 +308,7 @@ export default function App() {
                 setBusy(false);
                 setImportProgress(null);
                 setBook(previous => previous ? { ...previous, importStatus: 'error' } : previous);
+                void getAllBooks().then(setBooks);
             },
         }).catch(() => { setBusy(false); setImportProgress(null); setError(previous => previous ?? 'No se pudo importar el libro. Inténtalo de nuevo.'); });
     }, [applyBook, controller]);
@@ -315,21 +321,44 @@ export default function App() {
             setError('Formato no soportado. Usa PDF, EPUB, DOCX, TXT o Markdown.');
             return;
         }
-        if (book)
-            setPendingFile(file);
-        else
-            importFile(file);
+        importFile(file);
     };
     const importBusy = busy || book?.importStatus === 'importing';
+    const selectBook = async (id: string) => {
+        if (importBusy || switching.current) return;
+        switching.current = true;
+        controller.pause();
+        try {
+            const selected = await getBook(id);
+            if (!selected) { setError('No se pudo abrir el libro.'); return; }
+            await ensureBookSections(id);
+            await putMeta('activeBookId', id);
+            const opened = await updateBook(id, {lastOpenedAt: Date.now()});
+            setSections([]); setCurrentText(''); setCoverUrl(null);
+            currentSectionIndexRef.current = null;
+            applyBook(opened ?? selected);
+            setRate(selected.rate); setVoiceURI(selected.voiceURI);
+            controller.setRate(selected.rate);
+            controller.setVoice(voices.find(v => v.id === selected.voiceURI) ?? null);
+            controller.setBook(selected.totalChunks, selected.currentChunk);
+            setError(selected.errorMessage ?? null);
+            setUI(p => ({...p, view: 'reader'}));
+        } finally { switching.current = false; }
+    };
+    const editBook = async (id: string, patch: Partial<BookRecord>) => {
+        const updated = await updateBook(id, patch);
+        if (!updated) { setError('No se pudo guardar el cambio.'); return; }
+        setBooks(previous => previous.map(b => b.id === id ? updated : b));
+    };
     return (<AppShell view={ui.view} onNavigate={navigate} hasBook={!!book}>
       <input ref={fileInput} className="sr-only" tabIndex={-1} aria-label="Archivo del libro" type="file" accept=".pdf,.epub,.txt,.md,.markdown,.docx" onChange={handleFileChange} disabled={importBusy || !ready}/>
       {!ready && <p role="status">Recuperando tu lectura…</p>}
       {error && <p className="error global-notice" role="alert">{error}</p>}
-      {ui.view === 'library' && <Library book={book} index={index} coverUrl={coverUrl} chapter={currentSection?.title} onRead={() => navigate('reader')} onListen={() => { navigate('reader'); controller.play(); }} onImport={() => fileInput.current?.click()} busy={importBusy || !ready}/>}
-      {ui.view === 'activity' && <section className="page-panel"><p className="eyebrow">TU ESPACIO PERSONAL</p><h1>Tu lectura.</h1><p>Cada página cuenta. Disfruta el camino.</p><div className="reading-stats"><div><strong>{book ? '01' : '00'}</strong><span>Libro disponible</span></div><div><strong>{book ? Math.round(index / Math.max(book.totalChunks - 1, 1) * 100) : 0}%</strong><span>Avance actual</span></div><div><strong>{book?.totalSections ?? 0}</strong><span>Secciones del libro</span></div></div><div className="quiet-card"><h2>Tu tiempo, sin prisa.</h2><p>La lectura y la escucha comparten tu posición guardada. El historial de horas llegará con las sesiones de lectura.</p>{book && <button className="primary-button" onClick={() => navigate('reader')}>Volver a mi libro →</button>}</div></section>}
+      {ui.view === 'library' && <Library books={books} onSelect={selectBook} onEdit={editBook} book={book} index={index} coverUrl={coverUrl} chapter={currentSection?.title} onRead={() => navigate('reader')} onListen={() => { navigate('reader'); controller.play(); }} onImport={() => fileInput.current?.click()} busy={importBusy || !ready}/>}
+      {ui.view === 'activity' && <section className="page-panel"><p className="eyebrow">TU ESPACIO PERSONAL</p><h1>Tu lectura.</h1><p>Cada página cuenta. Disfruta el camino.</p><div className="reading-stats"><div><strong>{books.length}</strong><span>Libros disponibles</span></div><div><strong>{book ? Math.round(index / Math.max(book.totalChunks - 1, 1) * 100) : 0}%</strong><span>Avance actual</span></div><div><strong>{book?.totalSections ?? 0}</strong><span>Secciones del libro</span></div></div><div className="quiet-card"><h2>Tu tiempo, sin prisa.</h2><p>La lectura y la escucha comparten tu posición guardada. El historial de horas llegará con las sesiones de lectura.</p>{book && <button className="primary-button" onClick={() => navigate('reader')}>Volver a mi libro →</button>}</div></section>}
       {ui.view === 'settings' && <section className="page-panel"><p className="eyebrow">A TU MANERA</p><h1>Ajustes.</h1><p>Un espacio cómodo para quedarte un capítulo más.</p><div className="quiet-card"><h2>Apariencia del lector</h2><div className="theme-picker">{(['paper', 'sepia', 'dark', 'oled'] as ReaderTheme[]).map((theme, i) => <button key={theme} data-theme={theme} aria-pressed={ui.theme === theme} onClick={() => setUI(p => ({ ...p, theme }))}>{['Blanco', 'Marfil', 'Oscuro', 'OLED'][i]}</button>)}</div><label className="setting">Tamaño del texto · {ui.fontSize}px<input type="range" min="18" max="32" value={ui.fontSize} onChange={e => setUI(p => ({ ...p, fontSize: Number(e.target.value) }))}/></label></div><div className="quiet-card"><h2>Tu biblioteca es privada</h2><p>Los archivos y tu posición se guardan en este dispositivo. Sin cuentas, suscripciones ni servicios de pago añadidos.</p><p className="fine-print">Conserva tus archivos originales: el sistema puede liberar datos del navegador si falta espacio.</p></div></section>}
       {ui.view === 'reader' && !book && <section className="page-panel"><h1>Abre tu próxima historia.</h1><p>Tu lector estará aquí cuando importes un libro.</p><button className="primary-button" onClick={() => fileInput.current?.click()} disabled={!ready || importBusy}>Importar libro</button></section>}
-      {pendingFile && <Sheet title="Cambiar de libro" onClose={() => setPendingFile(null)}><p>Esta versión conserva un solo libro. Importar <strong>{pendingFile.name}</strong> eliminará el libro actual y su progreso de este dispositivo, incluso si la nueva importación falla. Tu archivo original no se modifica.</p><div className="dialog-actions"><button className="subtle-button" onClick={() => setPendingFile(null)}>Conservar mi libro</button><button className="primary-button" onClick={() => { const file = pendingFile; setPendingFile(null); importFile(file); }}>Reemplazar e importar</button></div></Sheet>}
+
       {book && (<Reader view={ui.view} theme={ui.theme} fontSize={ui.fontSize} book={book} sections={sections} currentSection={currentSection} coverUrl={coverUrl} index={index} currentText={currentText} status={status} rate={rate} voiceURI={voiceURI} voices={voices} onRefreshVoices={refreshVoices} importProgress={importProgress} busy={busy} error={error} onRateChange={setRate} onVoiceChange={setVoiceURI} onFileChange={handleFileChange} controller={controller} ttsSupported={ttsSupported} showChapters={showChapters} onOpenChapters={() => setShowChapters(true)} onCloseChapters={() => setShowChapters(false)} onSelectSection={goToSection} onAdjacentSection={goToAdjacentSection} showDiagnostics={showDiagnostics} onOpenDiagnostics={openDiagnostics} onCloseDiagnostics={() => setShowDiagnostics(false)} storageUsage={storageUsage}/>)}
     </AppShell>);
 }

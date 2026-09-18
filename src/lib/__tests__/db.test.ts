@@ -229,3 +229,13 @@ describe("db — files, covers, meta", () => {
     expect(await getMeta("nope")).toBeUndefined();
   });
 });
+
+it('restores an explicit active book and falls back when its reference is missing', async () => {
+  await clearAllBooks();
+  await putBook(makeBook({id:'old',importStatus:'done',lastOpenedAt:1}));
+  await putBook(makeBook({id:'new',importStatus:'done',lastOpenedAt:2}));
+  await putMeta('activeBookId','old');
+  expect((await getActiveBook())?.id).toBe('old');
+  await putMeta('activeBookId','missing');
+  expect((await getActiveBook())?.id).toBe('new');
+});
