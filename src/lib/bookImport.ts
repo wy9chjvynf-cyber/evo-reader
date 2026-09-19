@@ -1,5 +1,7 @@
 import {
   deleteFileBlob,
+  getAllBooks,
+  commitPdfPage,
   getBook,
   getFileBlob,
   getMeta,
@@ -11,7 +13,7 @@ import {
   type BookFormat,
   type BookRecord,
 } from "./db";
-import { importPdfIncremental, type OpenSectionState } from "./pdfImport";
+import { importPdfIncremental, type OpenSectionState, PDF_LIMITS } from "./pdfImport";
 import { importEpubIncremental } from "./epubImport";
 import { extractDocxSegments } from "./docxImport";
 import { buildMarkdownSegments, buildTxtSegments } from "./textImport";
@@ -162,26 +164,18 @@ async function importWholeDocument(
 async function importPdf(book: BookRecord, file: File, callbacks: ImportCallbacks): Promise<BookRecord> {
   await updateBook(book.id, { importStage: "opening" });
   await putFileBlob(book.id, file);
-  const data = await file.arrayBuffer();
+  if (!await getFileBlob(book.id)) throw new Error("No se pudo guardar el PDF. Revisa el espacio disponible.");
 
   await updateBook(book.id, { importStage: "structure" });
   let result;
   try {
-    result = await importPdfIncremental(book.id, data, {
+    result = await importPdfIncremental(book.id, file, {
+      signal: activeController?.signal,
       startPage: 1,
       startChunkIndex: 0,
       nextSectionIndex: 0,
       openSection: null,
-      onCover: (blob) => {
-        // putCover degrades to undefined (not a rejection) if IndexedDB can't
-        // store this Blob on this device — only claim hasCover when it
-        // actually landed, so the UI never tries to load a cover that isn't there.
-        void putCover(book.id, blob).then((stored) => {
-          if (stored) void updateBook(book.id, { hasCover: true });
-        });
-      },
-      onProgress: ({ page, totalPages, chunksSoFar }) => {
-        void (async () => {
+      onProgress: async ({ page, totalPages, chunksSoFar }) => {
           const updated = await getBook(book.id);
           if (updated) {
             callbacks.onProgress?.(updated, {
@@ -192,14 +186,13 @@ async function importPdf(book: BookRecord, file: File, callbacks: ImportCallback
               playable: chunksSoFar > 0,
             });
           }
-        })();
       },
     });
   } catch (err) {
     throw new StagedImportError(err instanceof Error ? err.message : "No se pudo procesar el PDF.", "extracting");
   }
 
-  const done = await updateBook(book.id, {
+  await commitPdfPage(book.id, [], [], {
     importStatus: "done",
     importStage: "done",
     importProgress: 100,
@@ -208,6 +201,7 @@ async function importPdf(book: BookRecord, file: File, callbacks: ImportCallback
     totalSections: result.totalSections,
     wordCount: result.wordCount,
   });
+  const done = await getBook(book.id);
   await deleteFileBlob(book.id);
   return done ?? book;
 }
@@ -275,11 +269,12 @@ async function importEpub(book: BookRecord, file: File, callbacks: ImportCallbac
 }
 
 /** The awaitable core — used directly by tests; UI code uses beginImport() below. */
-export async function runImport(file: File, callbacks: ImportCallbacks = {}): Promise<BookRecord> {
+async function runImportCore(file: File, callbacks: ImportCallbacks = {}, identity?: string): Promise<BookRecord> {
   const format = detectFormat(file.name);
   if (!format) throw new Error("Formato no soportado. Usa PDF, EPUB, DOCX, TXT o MD.");
 
   const book = await createBookRecord(file, format);
+  if (identity) await commitPdfPage(book.id, [], [], { fingerprint: identity });
   callbacks.onCreated?.(book);
 
   try {
@@ -310,7 +305,7 @@ async function findOpenPdfSection(bookId: string): Promise<OpenSectionState | nu
 }
 
 /** Resumes a pdf/epub import interrupted mid-way (app closed, tab killed, crash). */
-export async function runResume(book: BookRecord, callbacks: ImportCallbacks = {}): Promise<BookRecord> {
+async function runResumeCore(book: BookRecord, callbacks: ImportCallbacks = {}): Promise<BookRecord> {
   if (book.format !== "pdf" && book.format !== "epub") {
     const failed = await updateBook(book.id, { importStatus: "error", importStage: "extracting", errorMessage: "Importación incompleta." });
     const message = "No se pudo reanudar la importación de este archivo. Cárgalo de nuevo.";
@@ -331,7 +326,8 @@ export async function runResume(book: BookRecord, callbacks: ImportCallbacks = {
   }
 
   try {
-    const data = await fileRecord.blob.arrayBuffer();
+    book = (await getBook(book.id)) ?? book;
+    await commitPdfPage(book.id, [], [], { importStatus: "importing", errorMessage: undefined });
     let done: BookRecord | undefined;
 
     if (book.format === "pdf") {
@@ -342,29 +338,30 @@ export async function runResume(book: BookRecord, callbacks: ImportCallbacks = {
       // existing ones — reusing the open section's own index here would
       // silently overwrite it instead of creating a new row.
       const nextSectionIndex = sections.length > 0 ? Math.max(...sections.map((s) => s.index)) + 1 : 0;
-      const result = await importPdfIncremental(book.id, data, {
+      const result = await importPdfIncremental(book.id, fileRecord.blob, {
+        signal: activeController?.signal,
         startPage: book.importedUntil + 1,
         startChunkIndex: book.totalChunks,
         nextSectionIndex,
         openSection,
-        onProgress: ({ page, totalPages, chunksSoFar }) => {
-          void (async () => {
+        onProgress: async ({ page, totalPages, chunksSoFar }) => {
             const updated = await getBook(book.id);
             if (updated) {
               callbacks.onProgress?.(updated, { page, totalPages, chunksSoFar, percent: Math.round((page / totalPages) * 100), playable: true });
             }
-          })();
         },
       });
-      done = await updateBook(book.id, {
+      await commitPdfPage(book.id, [], [], {
         importStatus: "done",
         importStage: "done",
         importProgress: 100,
         totalChunks: result.totalChunks,
         totalSections: result.totalSections,
+        wordCount: result.wordCount,
       });
+      done = await getBook(book.id);
     } else {
-      const result = await importEpubIncremental(book.id, data, {
+      const result = await importEpubIncremental(book.id, await fileRecord.blob.arrayBuffer(), {
         startSpineIndex: book.importedUntil,
         startSectionIndex: book.totalSections,
         startChunkIndex: book.totalChunks,
@@ -406,4 +403,55 @@ export async function runResume(book: BookRecord, callbacks: ImportCallbacks = {
 
 export function beginResume(book: BookRecord, callbacks: ImportCallbacks): void {
   void runResume(book, callbacks);
+}
+
+let activeController: AbortController | null = null;
+export function cancelImport() { activeController?.abort(); }
+async function exclusiveImport<T>(operation: () => Promise<T>): Promise<T> {
+  if (activeController) throw new Error("Ya hay una importación en curso.");
+  const execute = async () => {
+    if (activeController) throw new Error("Ya hay una importación en curso.");
+    activeController = new AbortController();
+    try { return await operation(); } finally { activeController = null; }
+  };
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request("evoreader-import", { ifAvailable: true }, lock => {
+      if (!lock) throw new Error("Hay una importación abierta en otra pestaña.");
+      return execute();
+    });
+  }
+  return execute();
+}
+
+/** Chained SHA-256 over fixed blocks: exact content identity with constant working memory. */
+async function fingerprint(file: Blob) {
+  let digest = new Uint8Array(32);
+  for (let offset = 0; offset < file.size; offset += 256 * 1024) {
+    if (activeController?.signal.aborted) throw new Error("Importación cancelada.");
+    const block = new Uint8Array(await file.slice(offset, offset + 256 * 1024).arrayBuffer());
+    const input = new Uint8Array(32 + block.length);
+    input.set(digest); input.set(block, 32);
+    digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  }
+  return `${file.size}:` + Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+}
+export function runImport(file: File, callbacks: ImportCallbacks = {}): Promise<BookRecord> {
+  return exclusiveImport(async () => {
+    if (detectFormat(file.name) !== "pdf") return runImportCore(file, callbacks);
+    if (file.size > PDF_LIMITS.fileBytes) throw new Error("PDF de más de 256 MB: divide el documento antes de importarlo.");
+    const identity = await fingerprint(file);
+    const duplicate = (await getAllBooks()).find(b => b.format === "pdf" && b.fingerprint === identity);
+    if (duplicate) {
+      callbacks.onCreated?.(duplicate);
+      if (duplicate.importStatus !== "done") {
+        if (!await getFileBlob(duplicate.id)) await putFileBlob(duplicate.id, file);
+        return runResumeCore(duplicate, callbacks);
+      }
+      callbacks.onDone?.(duplicate); return duplicate;
+    }
+    return runImportCore(file, callbacks, identity);
+  });
+}
+export function runResume(book: BookRecord, callbacks: ImportCallbacks = {}): Promise<BookRecord> {
+  return exclusiveImport(() => runResumeCore(book, callbacks));
 }

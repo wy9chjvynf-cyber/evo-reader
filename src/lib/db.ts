@@ -6,6 +6,9 @@ export type BookFormat = "pdf" | "txt" | "md" | "docx" | "epub";
 export type ImportStage = "opening" | "metadata" | "structure" | "extracting" | "worker" | "persisting" | "done";
 
 export interface BookRecord {
+  fingerprint?: string;
+  emptyPages?: number;
+  damagedPages?: number;
   favorite?: boolean;
   collection?: string;
   id: string;
@@ -352,4 +355,39 @@ export async function estimateStorageUsage(): Promise<{ usage: number; quota: nu
   } catch {
     return undefined;
   }
+}
+
+/** Strict, atomic checkpoint: quota/transaction failures must reach the importer. */
+export async function commitPdfPage(bookId: string, chunks: ChunkRecord[], sections: SectionRecord[], patch: Partial<BookRecord>) {
+  const db = await getDB();
+  const tx = db.transaction(["books", "chunks", "sections"], "readwrite");
+  try {
+    const book = await tx.objectStore("books").get(bookId);
+    if (!book) throw new Error("Libro no disponible.");
+    for (const chunk of chunks) await tx.objectStore("chunks").put(chunk);
+    for (const section of sections) await tx.objectStore("sections").put(section);
+    await tx.objectStore("books").put({ ...book, ...patch, updatedAt: Date.now() });
+    await tx.done;
+  } catch (error) {
+    try { tx.abort(); } catch { /* already aborted */ }
+    await tx.done.catch(() => {});
+    throw error;
+  }
+}
+
+/** Cursor cleanup never materializes stored PDFs or all book text. Keep resumable sources. */
+export async function cleanupImportOrphans() {
+  const db = await getDB();
+  const tx = db.transaction(["books", "files", "chunks", "sections", "covers"], "readwrite");
+  for (const name of ["files", "chunks", "sections", "covers"] as const) {
+    let cursor = await tx.objectStore(name).openKeyCursor();
+    while (cursor) {
+      const key = cursor.primaryKey;
+      const id = Array.isArray(key) ? key[0] as string : key as string;
+      const book = await tx.objectStore("books").get(id);
+      if (!book || (name === "files" && book.importStatus === "done")) await tx.objectStore(name).delete(key as never);
+      cursor = await cursor.continue();
+    }
+  }
+  await tx.done;
 }

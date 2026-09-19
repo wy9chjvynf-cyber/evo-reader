@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { runImport, runResume, type ImportProgressInfo } from "./lib/bookImport";
-import { ensureBookSections, estimateStorageUsage, getActiveBook, getAllBooks, getBook, getChunk, getCover, getMeta, getSections, putMeta, updateBook, type BookRecord, type ImportStage, type SectionRecord, } from "./lib/db";
+import { cancelImport, runImport, runResume, type ImportProgressInfo } from "./lib/bookImport";
+import { cleanupImportOrphans, ensureBookSections, estimateStorageUsage, getActiveBook, getAllBooks, getBook, getChunk, getCover, getMeta, getSections, putMeta, updateBook, type BookRecord, type ImportStage, type SectionRecord, } from "./lib/db";
 import { findSectionForChunk } from "./lib/sectionLookup";
 import { isEvoSpeechPluginAvailable, isNativeIosBridgeAvailable } from "./lib/nativeIosSpeechEngine";
 import { SpeechController, type PlaybackStatus } from "./lib/speechController";
@@ -138,6 +138,7 @@ export default function App() {
             return;
         restoreStarted.current = true;
         (async () => {
+            await cleanupImportOrphans().catch(() => {});
             const storedUI = await getMeta('ui.v3');
             setUI(readUICheckpoint() ?? normalizeUI(storedUI));
             const [existingBook, lastSettings] = await Promise.all([getActiveBook(), getMeta<LastSettings>("lastSettings")]);
@@ -289,7 +290,7 @@ export default function App() {
             onCreated: (b) => {
                 applyBook(b);
                 void putMeta("activeBookId", b.id);
-                controller.setBook(0, 0);
+                controller.setBook(b.totalChunks, b.currentChunk);
                 setBusy(false);
                 setUI(p => ({ ...p, view: 'reader' }));
             },
@@ -310,7 +311,7 @@ export default function App() {
                 setBook(previous => previous ? { ...previous, importStatus: 'error' } : previous);
                 void getAllBooks().then(setBooks);
             },
-        }).catch(() => { setBusy(false); setImportProgress(null); setError(previous => previous ?? 'No se pudo importar el libro. Inténtalo de nuevo.'); });
+        }).catch(err => { setBusy(false); setImportProgress(null); setError(previous => previous ?? (err instanceof Error ? err.message : 'No se pudo importar el libro.')); });
     }, [applyBook, controller]);
     const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -322,6 +323,18 @@ export default function App() {
             return;
         }
         importFile(file);
+    };
+    const retryImport = () => {
+        if (!book || busy) return;
+        setBusy(true); setError(null);
+        void runResume(book, {
+            onProgress: (b, p) => { applyBook(b); controller.setTotalChunks(b.totalChunks); setImportProgress(p); },
+            onDone: b => { applyBook(b); controller.setTotalChunks(b.totalChunks); setImportProgress(null); },
+            onError: message => { setError(message); setImportProgress(null); },
+        }).catch(e => setError(e.message)).finally(() => {
+            setBusy(false);
+            void getBook(book.id).then(b => { if (b) applyBook(b); });
+        });
     };
     const importBusy = busy || book?.importStatus === 'importing';
     const selectBook = async (id: string) => {
@@ -359,6 +372,11 @@ export default function App() {
       {ui.view === 'settings' && <section className="page-panel"><p className="eyebrow">A TU MANERA</p><h1>Ajustes.</h1><p>Un espacio cómodo para quedarte un capítulo más.</p><div className="quiet-card"><h2>Apariencia del lector</h2><div className="theme-picker">{(['paper', 'sepia', 'dark', 'oled'] as ReaderTheme[]).map((theme, i) => <button key={theme} data-theme={theme} aria-pressed={ui.theme === theme} onClick={() => setUI(p => ({ ...p, theme }))}>{['Blanco', 'Marfil', 'Oscuro', 'OLED'][i]}</button>)}</div><label className="setting">Tamaño del texto · {ui.fontSize}px<input type="range" min="18" max="32" value={ui.fontSize} onChange={e => setUI(p => ({ ...p, fontSize: Number(e.target.value) }))}/></label></div><div className="quiet-card"><h2>Tu biblioteca es privada</h2><p>Los archivos y tu posición se guardan en este dispositivo. Sin cuentas, suscripciones ni servicios de pago añadidos.</p><p className="fine-print">Conserva tus archivos originales: el sistema puede liberar datos del navegador si falta espacio.</p></div></section>}
       {ui.view === 'reader' && !book && <section className="page-panel"><h1>Abre tu próxima historia.</h1><p>Tu lector estará aquí cuando importes un libro.</p><button className="primary-button" onClick={() => fileInput.current?.click()} disabled={!ready || importBusy}>Importar libro</button></section>}
 
+      {book?.format === 'pdf' && (importBusy || book.importStatus === 'error') && <div className="import-progress">
+        {importBusy ? <button className="button secondary" onClick={cancelImport}>Cancelar importación</button> : <button className="button secondary" onClick={retryImport}>Reintentar importación</button>}
+      </div>}
+      {!!book?.emptyPages && <p className="notice">{book.emptyPages} páginas sin texto extraíble. El OCR no está incluido.</p>}
+      {!!book?.damagedPages && <p role="alert">{book.damagedPages} páginas dañadas omitidas; el contenido está incompleto.</p>}
       {book && (<Reader view={ui.view} theme={ui.theme} fontSize={ui.fontSize} book={book} sections={sections} currentSection={currentSection} coverUrl={coverUrl} index={index} currentText={currentText} status={status} rate={rate} voiceURI={voiceURI} voices={voices} onRefreshVoices={refreshVoices} importProgress={importProgress} busy={busy} error={error} onRateChange={setRate} onVoiceChange={setVoiceURI} onFileChange={handleFileChange} controller={controller} ttsSupported={ttsSupported} showChapters={showChapters} onOpenChapters={() => setShowChapters(true)} onCloseChapters={() => setShowChapters(false)} onSelectSection={goToSection} onAdjacentSection={goToAdjacentSection} showDiagnostics={showDiagnostics} onOpenDiagnostics={openDiagnostics} onCloseDiagnostics={() => setShowDiagnostics(false)} storageUsage={storageUsage}/>)}
     </AppShell>);
 }

@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "checks": [
+    "two imports retain both books",
+    "independent position and active-book reload",
+    "favorites and collections persist",
+    "320/390/820/1440 no overflow",
+    "failed third import preserves previous books",
+    "offline restoration"
+  ],
+  "errors": []
+}

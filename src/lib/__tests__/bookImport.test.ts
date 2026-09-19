@@ -4,24 +4,30 @@
 // jsdom for DOMParser, are tested separately).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const pdfMock = vi.hoisted(() => ({ pages: [] as string[] }));
+const pdfMock = vi.hoisted(() => ({ pages: [] as string[], hangOnce: false, corruptPage: 0 }));
 
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
+  PDFDataRangeTransport: class {},
+  PDFWorker: class { promise = Promise.resolve(); destroy() {} },
   getDocument: () => ({
+    destroy: async () => {},
     promise: Promise.resolve({
       numPages: pdfMock.pages.length,
-      getPage: async (pageNumber: number) => ({
-        getTextContent: async () => ({
+      getPage: async (pageNumber: number) => {
+        if (pdfMock.hangOnce) { pdfMock.hangOnce = false; return new Promise(() => {}); }
+        if (pdfMock.corruptPage === pageNumber) { const e = new Error('Damaged page'); e.name = 'FormatError'; throw e; }
+        return ({
+        streamTextContent: () => new ReadableStream({ start(controller) { controller.enqueue({
           // One "line" per newline-separated fragment, each ending the line
           // (hasEOL), matching how pdfImport.ts reconstructs lines for
           // heading detection.
           items: pdfMock.pages[pageNumber - 1].split("\n").map((str) => ({ str, hasEOL: true })),
-        }),
+        }); controller.close(); } }),
         cleanup: () => {},
         getViewport: () => ({ width: 100, height: 100 }),
         render: () => ({ promise: Promise.resolve() }),
-      }),
+      }); },
       cleanup: async () => {},
     }),
   }),
@@ -270,4 +276,70 @@ describe("bookImport — pdf", () => {
     const result = await runResume(interrupted);
     expect(result.importStatus).toBe("error");
   });
+});
+
+describe("PDF durable job", () => {
+  beforeEach(async () => { await clearAllBooks(); pdfMock.pages = []; });
+  it("cancels at a committed page and resumes without duplicate chunks or word-count loss", async () => {
+    const { cancelImport } = await import('../bookImport');
+    pdfMock.pages = Array.from({length:80}, (_,i)=>`Page ${i+1}. Some readable words.`);
+    let id = '';
+    await expect(runImport(makePdfFile(), {onCreated:b=>{id=b.id;}, onProgress:(_,p)=>{if(p.page===17) cancelImport();}})).rejects.toThrow(/cancelada/);
+    const partial = (await getBook(id))!;
+    expect(partial.importedUntil).toBe(17);
+    expect(await getFileBlob(id)).toBeDefined();
+    const finished = await runResume(partial);
+    expect(finished.importStatus).toBe('done');
+    expect(finished.importedUntil).toBe(80);
+    expect(finished.wordCount).toBe(400);
+    const chunks = await getChunkRange(id,0,1000);
+    expect(chunks).toHaveLength(80);
+    expect(chunks.map(c=>c.sourcePage)).toEqual(Array.from({length:80},(_,i)=>i+1));
+    expect(await getFileBlob(id)).toBeUndefined();
+  });
+  it("reuses a PDF duplicate even after renaming", async () => {
+    pdfMock.pages=['One page of readable content.'];
+    const first=await runImport(makePdfFile('first.pdf'));
+    const second=await runImport(makePdfFile('renamed.pdf'));
+    expect(second.id).toBe(first.id);
+  });
+  it("keeps blank-page counts and reports a scanned/empty PDF rather than success", async () => {
+    pdfMock.pages=['','','']; let id='';
+    await expect(runImport(makePdfFile(),{onCreated:b=>{id=b.id;}})).rejects.toThrow(/OCR/);
+    expect((await getBook(id))?.emptyPages).toBe(3);
+    expect((await getBook(id))?.importStatus).toBe('error');
+  });
+  it("does not load the full PDF buffer", async () => {
+    pdfMock.pages=['Readable text.']; const file=makePdfFile();
+    file.arrayBuffer=()=>{throw new Error('Full-file read forbidden');};
+    expect((await runImport(file)).importStatus).toBe('done');
+  });
+  it("rejects pathological page text without advancing the checkpoint", async () => {
+    pdfMock.pages=['Readable first page.', 'X'.repeat(300000)]; let id='';
+    await expect(runImport(makePdfFile(),{onCreated:b=>{id=b.id;}})).rejects.toThrow(/demasiado texto/);
+    expect((await getBook(id))?.importedUntil).toBe(1);
+  });
+  it("rejects competing imports instead of interleaving jobs", async () => {
+    pdfMock.pages=Array(50).fill('Readable page.');
+    const first=runImport(makePdfFile());
+    await expect(runImport(makePdfFile('other.pdf'))).rejects.toThrow(/curso/);
+    await first;
+  });
+});
+
+it("retries one timed-out worker from the saved checkpoint", async () => {
+  await clearAllBooks();
+  const {PDF_LIMITS} = await import('../pdfImport');
+  const old = PDF_LIMITS.timeoutMs;
+  PDF_LIMITS.timeoutMs = 20;
+  pdfMock.pages = ['Readable text after worker restart.']; pdfMock.hangOnce = true;
+  try { expect((await runImport(makePdfFile())).importStatus).toBe('done'); }
+  finally { PDF_LIMITS.timeoutMs = old; pdfMock.hangOnce = false; }
+});
+it("preserves readable pages and records explicit partial corruption", async () => {
+  await clearAllBooks(); pdfMock.pages = ['Readable page one.', 'Corrupt', 'Readable page three.']; pdfMock.corruptPage = 2;
+  try {
+    const book = await runImport(makePdfFile());
+    expect(book.importStatus).toBe('done'); expect(book.damagedPages).toBe(1); expect(book.totalChunks).toBe(2);
+  } finally { pdfMock.corruptPage = 0; }
 });

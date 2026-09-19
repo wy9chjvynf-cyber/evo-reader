@@ -1,0 +1,369 @@
+[
+  {
+    "pages": 500,
+    "fileBytes": 1179098,
+    "seconds": 2.101,
+    "book": {
+      "id": "1789746616124-at6o01",
+      "title": "evo-stress-500-0",
+      "author": null,
+      "language": null,
+      "format": "pdf",
+      "size": 1179098,
+      "totalPages": 500,
+      "totalSections": 1,
+      "totalChunks": 5000,
+      "wordCount": 121000,
+      "currentSection": 0,
+      "currentChunk": 0,
+      "importStatus": "done",
+      "importStage": "done",
+      "importProgress": 100,
+      "importedUntil": 500,
+      "hasCover": false,
+      "rate": 1,
+      "voiceURI": "Eddy (español (España))",
+      "createdAt": 1789746616124,
+      "updatedAt": 1789746617591,
+      "lastOpenedAt": 1789746616124,
+      "fingerprint": "1179098:3dd8fda4746475c57caea600680777ff631b0db9368ff37c6c5d589ed8aa5a20",
+      "emptyPages": 0,
+      "damagedPages": 0
+    },
+    "metrics": {
+      "ticks": 98,
+      "maxGap": 19,
+      "longTasks": [],
+      "heap": []
+    },
+    "rss": [
+      {
+        "page": 0,
+        "bytes": 1081327616
+      },
+      {
+        "page": 73,
+        "bytes": 1157201920
+      },
+      {
+        "page": 160,
+        "bytes": 1170702336
+      },
+      {
+        "page": 256,
+        "bytes": 1176813568
+      },
+      {
+        "page": 345,
+        "bytes": 1201995776
+      },
+      {
+        "page": 436,
+        "bytes": 1211727872
+      },
+      {
+        "page": 500,
+        "bytes": 1211564032
+      }
+    ],
+    "errors": []
+  },
+  {
+    "pages": 1000,
+    "fileBytes": 2360167,
+    "seconds": 3.731,
+    "book": {
+      "id": "1789746618844-wzpywv",
+      "title": "evo-stress-1000-0",
+      "author": null,
+      "language": null,
+      "format": "pdf",
+      "size": 2360167,
+      "totalPages": 1000,
+      "totalSections": 1,
+      "totalChunks": 10000,
+      "wordCount": 242000,
+      "currentSection": 0,
+      "currentChunk": 0,
+      "importStatus": "done",
+      "importStage": "done",
+      "importProgress": 100,
+      "importedUntil": 1000,
+      "hasCover": false,
+      "rate": 1,
+      "voiceURI": "Eddy (español (España))",
+      "createdAt": 1789746618844,
+      "updatedAt": 1789746621766,
+      "lastOpenedAt": 1789746618844,
+      "fingerprint": "2360167:744f3478638f0604edb182d3bc2df461d73cae771e8e5ad856d1e562511f0236",
+      "emptyPages": 0,
+      "damagedPages": 0
+    },
+    "metrics": {
+      "ticks": 198,
+      "maxGap": 22.19999998807907,
+      "longTasks": [],
+      "heap": []
+    },
+    "rss": [
+      {
+        "page": 0,
+        "bytes": 1097383936
+      },
+      {
+        "page": 68,
+        "bytes": 1158709248
+      },
+      {
+        "page": 182,
+        "bytes": 1176371200
+      },
+      {
+        "page": 270,
+        "bytes": 1189281792
+      },
+      {
+        "page": 357,
+        "bytes": 1206321152
+      },
+      {
+        "page": 449,
+        "bytes": 1214840832
+      },
+      {
+        "page": 544,
+        "bytes": 1220018176
+      },
+      {
+        "page": 624,
+        "bytes": 1244266496
+      },
+      {
+        "page": 714,
+        "bytes": 1259487232
+      },
+      {
+        "page": 800,
+        "bytes": 1263960064
+      },
+      {
+        "page": 896,
+        "bytes": 1265532928
+      },
+      {
+        "page": 992,
+        "bytes": 1265942528
+      },
+      {
+        "page": 1000,
+        "bytes": 1260208128
+      }
+    ],
+    "errors": []
+  },
+  {
+    "pages": 2100,
+    "fileBytes": 142591402,
+    "seconds": 12.347,
+    "book": {
+      "id": "1789746623386-zdairz",
+      "title": "evo-stress-2100-65536",
+      "author": null,
+      "language": null,
+      "format": "pdf",
+      "size": 142591402,
+      "totalPages": 2100,
+      "totalSections": 1,
+      "totalChunks": 21000,
+      "wordCount": 508200,
+      "currentSection": 0,
+      "currentChunk": 0,
+      "importStatus": "done",
+      "importStage": "done",
+      "importProgress": 100,
+      "importedUntil": 2100,
+      "hasCover": false,
+      "rate": 1,
+      "voiceURI": "Eddy (español (España))",
+      "createdAt": 1789746623386,
+      "updatedAt": 1789746633481,
+      "lastOpenedAt": 1789746623386,
+      "fingerprint": "142591402:4183caa0dafda800f984eb7fb3319f5d353e7a9bcfded2c73cc04dd03c5c0c3d",
+      "emptyPages": 0,
+      "damagedPages": 0
+    },
+    "metrics": {
+      "ticks": 644,
+      "maxGap": 23.19999998807907,
+      "longTasks": [],
+      "heap": []
+    },
+    "rss": [
+      {
+        "page": 0,
+        "bytes": 1076133888
+      },
+      {
+        "page": 0,
+        "bytes": 1217691648
+      },
+      {
+        "page": 57,
+        "bytes": 1235533824
+      },
+      {
+        "page": 96,
+        "bytes": 1241219072
+      },
+      {
+        "page": 156,
+        "bytes": 1255571456
+      },
+      {
+        "page": 205,
+        "bytes": 1257111552
+      },
+      {
+        "page": 256,
+        "bytes": 1259405312
+      },
+      {
+        "page": 318,
+        "bytes": 1285881856
+      },
+      {
+        "page": 365,
+        "bytes": 1278279680
+      },
+      {
+        "page": 416,
+        "bytes": 1279148032
+      },
+      {
+        "page": 480,
+        "bytes": 1277247488
+      },
+      {
+        "page": 529,
+        "bytes": 1286750208
+      },
+      {
+        "page": 579,
+        "bytes": 1286684672
+      },
+      {
+        "page": 640,
+        "bytes": 1283637248
+      },
+      {
+        "page": 694,
+        "bytes": 1291190272
+      },
+      {
+        "page": 743,
+        "bytes": 1295433728
+      },
+      {
+        "page": 800,
+        "bytes": 1297760256
+      },
+      {
+        "page": 859,
+        "bytes": 1303314432
+      },
+      {
+        "page": 908,
+        "bytes": 1303691264
+      },
+      {
+        "page": 960,
+        "bytes": 1303379968
+      },
+      {
+        "page": 1024,
+        "bytes": 1296941056
+      },
+      {
+        "page": 1074,
+        "bytes": 1303855104
+      },
+      {
+        "page": 1123,
+        "bytes": 1304018944
+      },
+      {
+        "page": 1184,
+        "bytes": 1300578304
+      },
+      {
+        "page": 1236,
+        "bytes": 1308033024
+      },
+      {
+        "page": 1285,
+        "bytes": 1308360704
+      },
+      {
+        "page": 1344,
+        "bytes": 1307443200
+      },
+      {
+        "page": 1400,
+        "bytes": 1312243712
+      },
+      {
+        "page": 1450,
+        "bytes": 1312276480
+      },
+      {
+        "page": 1504,
+        "bytes": 1312620544
+      },
+      {
+        "page": 1565,
+        "bytes": 1316356096
+      },
+      {
+        "page": 1615,
+        "bytes": 1316339712
+      },
+      {
+        "page": 1664,
+        "bytes": 1316569088
+      },
+      {
+        "page": 1728,
+        "bytes": 1313898496
+      },
+      {
+        "page": 1778,
+        "bytes": 1320927232
+      },
+      {
+        "page": 1827,
+        "bytes": 1320927232
+      },
+      {
+        "page": 1888,
+        "bytes": 1320222720
+      },
+      {
+        "page": 1941,
+        "bytes": 1324777472
+      },
+      {
+        "page": 1989,
+        "bytes": 1324630016
+      },
+      {
+        "page": 2048,
+        "bytes": 1322860544
+      },
+      {
+        "page": 2100,
+        "bytes": 1320992768
+      }
+    ],
+    "errors": []
+  }
+]

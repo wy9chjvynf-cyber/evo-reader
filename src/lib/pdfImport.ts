@@ -1,193 +1,148 @@
 import * as pdfjsLib from "pdfjs-dist";
-import type { PDFPageProxy } from "pdfjs-dist";
+import type { PDFPageProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { splitIntoChunks } from "./chunk";
 import { findHeadingNearTop } from "./chapterHeuristics";
-import { resizeImageBlobToJpeg } from "./coverImage";
 import { countWords } from "./sectionBuilder";
-import { putChunksBatch, putSection, updateBook, type ChunkRecord } from "./db";
+import { commitPdfPage, getBook, type SectionRecord } from "./db";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-
-export interface PdfImportProgress {
-  page: number;
-  totalPages: number;
-  chunksSoFar: number;
-}
-
-/** The section currently being written to — passed in when resuming, so we keep appending to it instead of starting a new one. */
-export interface OpenSectionState {
-  index: number;
-  title: string | null;
-  firstChunkIndex: number;
-  sourceStart: number;
-}
-
+export const PDF_LIMITS = { fileBytes: 256 * 1024 * 1024, rangeBytes: 64 * 1024, fetchedBytes: 32 * 1024 * 1024, pageCharacters: 256 * 1024, epochPages: 32, timeoutMs: 30_000 };
+export interface PdfImportProgress { page: number; totalPages: number; chunksSoFar: number }
+export interface OpenSectionState { index: number; title: string | null; firstChunkIndex: number; sourceStart: number }
 interface PdfImportOptions {
-  /** 1-based page to start from — > 1 when resuming an interrupted import. */
-  startPage: number;
-  startChunkIndex: number;
-  /** Index to assign to the *next* newly-detected chapter. */
-  nextSectionIndex: number;
-  /** The section currently open (unclosed) when resuming; null to start fresh at page 1. */
-  openSection: OpenSectionState | null;
-  onProgress: (progress: PdfImportProgress) => void;
-  onCover?: (blob: Blob) => void;
+  startPage: number; startChunkIndex: number; nextSectionIndex: number; openSection: OpenSectionState | null;
+  onProgress: (progress: PdfImportProgress) => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
-const devLog = import.meta.env.DEV ? console.debug : () => {};
-const COVER_MAX_WIDTH = 300;
+/** One outstanding disk read, no full-file arrayBuffer and no speculative fetching. */
+class BlobRanges extends pdfjsLib.PDFDataRangeTransport {
+  private stopped = false;
+  private queue = Promise.resolve();
+  private fetched = 0;
+  private blob: Blob;
+  private fail: (error: Error) => void;
+  constructor(blob: Blob, fail: (error: Error) => void) { super(blob.size, null, true); this.blob = blob; this.fail = fail; }
+  requestDataRange(begin: number, end: number) {
+    this.queue = this.queue.then(async () => {
+      if (this.stopped) return;
+      const length = end - begin;
+      this.fetched += length;
+      if (length > 8 * 1024 * 1024 || this.fetched > PDF_LIMITS.fetchedBytes) throw new Error(`PDF demasiado complejo: supera el límite de lectura por bloque. Divide el archivo; el avance queda guardado.`);
+      // PDF.js requires a complete response for each requested interval; splitting
+      // one response drops its tail and can trigger full-file corruption recovery.
+      const bytes = new Uint8Array(await this.blob.slice(begin, end).arrayBuffer());
+      if (!this.stopped) this.onDataRange(begin, bytes);
+    }).catch(error => { this.abort(); this.fail(error); });
+  }
+  abort() { this.stopped = true; }
+}
 
-type TextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
-
-function extractPageLines(content: TextContent): string[] {
+async function pageLines(page: PDFPageProxy): Promise<string[]> {
+  const reader = page.streamTextContent().getReader();
   const lines: string[] = [];
-  let current = "";
-  for (const item of content.items) {
-    if (!("str" in item)) continue;
-    current += item.str;
-    if ("hasEOL" in item && item.hasEOL) {
-      lines.push(current);
-      current = "";
-    } else {
-      current += " ";
-    }
-  }
-  if (current.trim()) lines.push(current);
-  return lines;
-}
-
-async function renderPageThumbnail(page: PDFPageProxy): Promise<Blob | null> {
+  let line = "", size = 0;
   try {
-    const unscaled = page.getViewport({ scale: 1 });
-    const scale = COVER_MAX_WIDTH / unscaled.width;
-    const viewport = page.getViewport({ scale });
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(viewport.width));
-    canvas.height = Math.max(1, Math.round(viewport.height));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.82));
-    return blob ? await resizeImageBlobToJpeg(blob, COVER_MAX_WIDTH) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Processes a PDF page by page: extract -> detect a conservative
- * chapter-heading match -> chunk -> persist -> release. Never holds more
- * than one page's text in memory at a time, and commits after every page so
- * an interrupted import can resume from importedUntil+1.
- *
- * Chapter detection only ever looks at the first few lines of each page for
- * an isolated CAPÍTULO/PRÓLOGO/EPÍLOGO/INTRODUCCIÓN-style line (see
- * chapterHeuristics.ts) — precision over recall. A PDF with no such lines
- * anywhere ends up with exactly one "Libro completo" section, same as
- * before this feature existed.
- */
-export async function importPdfIncremental(
-  bookId: string,
-  data: ArrayBuffer,
-  opts: PdfImportOptions,
-): Promise<{ totalPages: number; totalChunks: number; totalSections: number; wordCount: number }> {
-  const doc = await pdfjsLib.getDocument({ data }).promise;
-  const totalPages = doc.numPages;
-  let chunkIndex = opts.startChunkIndex;
-  let nextSectionIndex = opts.nextSectionIndex;
-  let wordCount = 0;
-
-  let open: OpenSectionState = opts.openSection ?? {
-    index: nextSectionIndex++,
-    title: null,
-    firstChunkIndex: chunkIndex,
-    sourceStart: opts.startPage,
-  };
-
-  const closeSection = async (sourceEnd: number) => {
-    if (open.firstChunkIndex > chunkIndex - 1) return; // nothing was ever added to it — discard silently
-    await putSection({
-      bookId,
-      index: open.index,
-      title: open.title,
-      level: 1,
-      sourceType: "page",
-      sourceStart: open.sourceStart,
-      sourceEnd,
-      firstChunkIndex: open.firstChunkIndex,
-      lastChunkIndex: chunkIndex - 1,
-      wordCount: 0,
-    });
-  };
-
-  try {
-    if (opts.startPage === 1 && opts.onCover) {
-      const firstPage = await doc.getPage(1);
-      const thumbnail = await renderPageThumbnail(firstPage);
-      if (thumbnail) opts.onCover(thumbnail);
-    }
-
-    for (let pageNum = opts.startPage; pageNum <= totalPages; pageNum++) {
-      const page = await doc.getPage(pageNum);
-      const content = await page.getTextContent();
-      const lines = extractPageLines(content);
-      page.cleanup();
-
-      const heading = findHeadingNearTop(lines);
-      // Exclude the heading's own line(s) from the narrated body — it's
-      // already shown/read as the section title, not as body content.
-      const bodyLines = heading ? lines.slice(heading.consumedLines) : lines;
-      const pageText = bodyLines.join(" ");
-
-      if (heading) {
-        await closeSection(pageNum - 1);
-        open = { index: nextSectionIndex++, title: heading.title, firstChunkIndex: chunkIndex, sourceStart: pageNum };
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const item of value.items) {
+        if (!("str" in item)) continue;
+        size += item.str.length + 1;
+        if (size > PDF_LIMITS.pageCharacters) throw new Error("Página con demasiado texto (máximo 256 Ki caracteres). Avance guardado.");
+        line += item.str + " ";
+        if (item.hasEOL) { lines.push(line.trim()); line = ""; }
       }
-
-      const pageChunks = splitIntoChunks(pageText);
-      const records: ChunkRecord[] = pageChunks.map((text, i) => ({
-        bookId,
-        index: chunkIndex + i,
-        sectionIndex: open.index,
-        sourcePage: pageNum,
-        text,
-      }));
-      await putChunksBatch(records);
-      chunkIndex += records.length;
-      wordCount += countWords(pageText);
-
-      // Keep the currently-open section's row up to date so a resume knows
-      // where it started even if we're interrupted before it's closed.
-      await putSection({
-        bookId,
-        index: open.index,
-        title: open.title,
-        level: 1,
-        sourceType: "page",
-        sourceStart: open.sourceStart,
-        sourceEnd: pageNum,
-        firstChunkIndex: open.firstChunkIndex,
-        lastChunkIndex: null,
-        wordCount: 0,
-      });
-
-      await updateBook(bookId, {
-        importedUntil: pageNum,
-        totalChunks: chunkIndex,
-        totalSections: nextSectionIndex,
-        totalPages,
-        importProgress: Math.round((pageNum / totalPages) * 100),
-      });
-
-      opts.onProgress({ page: pageNum, totalPages, chunksSoFar: chunkIndex });
-      devLog(`[pdfImport] page ${pageNum}/${totalPages}: +${records.length} chunks (total ${chunkIndex}), section "${open.title ?? "(sin título)"}"`);
     }
+    if (line.trim()) lines.push(line.trim());
+    return lines;
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
 
-    await closeSection(totalPages);
-  } finally {
-    await doc.cleanup();
-  }
-
+export async function importPdfIncremental(bookId: string, source: Blob, opts: PdfImportOptions) {
+  if (source.size > PDF_LIMITS.fileBytes) throw new Error("PDF de más de 256 MB: divide el documento antes de importarlo.");
+  let chunkIndex = opts.startChunkIndex, nextSectionIndex = opts.nextSectionIndex;
+  const previous = await getBook(bookId);
+  let wordCount = previous?.wordCount ?? 0, emptyPages = previous?.emptyPages ?? 0, damagedPages = previous?.damagedPages ?? 0;
+  let open = opts.openSection;
+  let totalPages = previous?.totalPages ?? 0;
+  let pageNum = opts.startPage;
+  let task: PDFDocumentLoadingTask | undefined;
+  let worker: pdfjsLib.PDFWorker | undefined;
+  let transientRetries = 0;
+  let transport: BlobRanges | undefined;
+  const aborted = () => { if (opts.signal?.aborted) throw new Error("Importación cancelada. Puedes reanudar desde el último avance guardado."); };
+  const section = (state: OpenSectionState, end: number, last: number | null): SectionRecord => ({ ...state, bookId, level: 1, sourceType: "page", sourceEnd: end, lastChunkIndex: last, wordCount: 0 });
+  do {
+    aborted();
+    let fail!: (error: Error) => void;
+    const failure = new Promise<never>((_, reject) => { fail = reject; });
+    // Observed even between operations (e.g. while committing to IndexedDB).
+    void failure.catch(() => {});
+    const cancel = () => fail(new Error("Importación cancelada. Puedes reanudar desde el último avance guardado."));
+    opts.signal?.addEventListener("abort", cancel, { once: true });
+    const bounded = async <T,>(operation: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { return await Promise.race([operation, failure, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("El PDF tardó demasiado. Reintenta desde el avance guardado.")), PDF_LIMITS.timeoutMs); })]); }
+      finally { clearTimeout(timer); }
+    };
+    try {
+      transport = new BlobRanges(source, fail);
+      worker = new pdfjsLib.PDFWorker();
+      await bounded(worker.promise);
+      if (typeof Worker !== "undefined" && !(worker.port instanceof Worker)) throw new Error("No se pudo iniciar el procesamiento en segundo plano. Recarga la aplicación.");
+      task = pdfjsLib.getDocument({ worker, stopAtErrors: true, range: transport, rangeChunkSize: PDF_LIMITS.rangeBytes, disableAutoFetch: true, disableStream: true });
+      const doc = await bounded(task.promise);
+      totalPages = doc.numPages;
+      const epochEnd = Math.min(totalPages, pageNum + PDF_LIMITS.epochPages - 1);
+      for (; pageNum <= epochEnd; pageNum++) {
+        aborted();
+        let page: PDFPageProxy | undefined, lines: string[] = [], damaged = false;
+        try {
+          page = await bounded(doc.getPage(pageNum));
+          lines = await bounded(pageLines(page));
+        } catch (error) {
+          // Only explicit parser corruption is skippable; never silently skip quota, timeout or cancellation.
+          if (error instanceof Error && (error.name === "FormatError" || (error.name === "UnknownErrorException" && /^FormatError:/.test(String((error as Error & { details?: string }).details))))) damaged = true;
+          else throw error;
+        } finally { page?.cleanup(); }
+        aborted();
+        const heading = findHeadingNearTop(lines);
+        const text = (heading ? lines.slice(heading.consumedLines) : lines).join(" ");
+        const chunks = splitIntoChunks(text);
+        const sections: SectionRecord[] = [];
+        if (heading && open && chunkIndex > open.firstChunkIndex) {
+          sections.push(section(open, pageNum - 1, chunkIndex - 1)); open = null;
+        }
+        if (!open && chunks.length) open = { index: nextSectionIndex++, title: heading?.title ?? null, firstChunkIndex: chunkIndex, sourceStart: pageNum };
+        const records = chunks.map((text, i) => ({ bookId, index: chunkIndex + i, sectionIndex: open!.index, sourcePage: pageNum, text }));
+        chunkIndex += records.length; wordCount += countWords(text);
+        if (damaged) damagedPages++; else if (!text.trim()) emptyPages++;
+        if (open) sections.push(section(open, pageNum, pageNum === totalPages ? chunkIndex - 1 : null));
+        await commitPdfPage(bookId, records, sections, { importedUntil: pageNum, totalChunks: chunkIndex, totalSections: nextSectionIndex, totalPages, wordCount, emptyPages, damagedPages, importStage: "extracting", importProgress: Math.round(pageNum / totalPages * 100) });
+        await opts.onProgress({ page: pageNum, totalPages, chunksSoFar: chunkIndex });
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } catch (error) {
+      if (!opts.signal?.aborted && error instanceof Error && /tardó demasiado/.test(error.message) && transientRetries++ < 1) {
+        // Retry once with a new worker at the last fully committed page.
+        const checkpoint = await getBook(bookId);
+        pageNum = (checkpoint?.importedUntil ?? 0) + 1;
+        continue;
+      }
+      throw error;
+    } finally {
+      transport?.abort();
+      opts.signal?.removeEventListener("abort", cancel);
+      // Terminate worker every epoch; PDF.js retains parsed objects and range bytes until destruction.
+      let destroyTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([task?.destroy().catch(() => {}), new Promise<void>(resolve => { destroyTimer = setTimeout(resolve, 1000); })]);
+      } finally { clearTimeout(destroyTimer); worker?.destroy(); }
+      task = undefined; worker = undefined;
+    }
+  } while (!totalPages || pageNum <= totalPages);
+  if (!chunkIndex) throw new Error("No se encontró texto: PDF escaneado, vacío o dañado. Necesita OCR; no se envía a servicios externos.");
   return { totalPages, totalChunks: chunkIndex, totalSections: nextSectionIndex, wordCount };
 }
