@@ -56,3 +56,9 @@ Ahora:
 - `scripts/verify-library.cjs`: biblioteca múltiple, posiciones, favoritos, colecciones, fallo no destructivo, offline y 320/390/820/1440 px, sin errores JavaScript.
 
 Referencia de API: https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib.html (range, disableAutoFetch y disableStream); implementación contrastada además contra los tipos y código de pdfjs-dist 6.3.289 instalado.
+
+## Publicación confirmada
+
+Código: `6757a51` en `release/evoreader-3-design`, subido a origin. Deploy GitHub Pages: `0569babd1cf95d8636cb7827a7dbe39399c4a049`. Respaldo remoto: `backup/pre-large-pdf-20260918` (versión previa `137e809`). Se conservaron los assets antiguos para pestañas abiertas.
+
+Sitio: https://wy9chjvynf-cyber.github.io/evo-reader/. Se confirmó en la respuesta pública el asset nuevo `index-Do7asI5H.js`. Prueba del sitio público en perfil limpio: se precacheó el worker, se desactivó la red, se importaron 2.101 páginas, se recargó tras página 80, se canceló tras página 83 y se retomó hasta completar 21.010 fragmentos únicos. Lectura offline final aprobada, cero errores JavaScript. Evidencia: `pdf-evidence/pdf-recovery-public.json`. Presupuestos del build publicado: JS gzip 343.728 bytes y CSS gzip 4.956 bytes.
