@@ -1,0 +1,30 @@
+{
+  "browser": "Chrome with missing iterator.find",
+  "book": {
+    "id": "1789779214345-aauwez",
+    "title": "evo-stress-87-0",
+    "author": null,
+    "language": null,
+    "format": "pdf",
+    "size": 205203,
+    "totalPages": null,
+    "totalSections": 0,
+    "totalChunks": 0,
+    "wordCount": 0,
+    "currentSection": 0,
+    "currentChunk": 0,
+    "importStatus": "error",
+    "importStage": "extracting",
+    "importProgress": 0,
+    "importedUntil": 0,
+    "hasCover": false,
+    "rate": 1,
+    "voiceURI": "Eddy (español (España))",
+    "createdAt": 1789779214345,
+    "updatedAt": 1789779214558,
+    "lastOpenedAt": 1789779214345,
+    "fingerprint": "205203:8339f0547bfdfd266df0e30150b69b79f5282ec65138f9f66f99b83212295945",
+    "errorMessage": "this._rangeReaders.keys(...).find is not a function"
+  },
+  "errors": []
+}

@@ -1,0 +1,31 @@
+{
+  "browser": "Chrome with missing iterator.find",
+  "book": {
+    "id": "1789779356380-5dp8ax",
+    "title": "evo-stress-87-0",
+    "author": null,
+    "language": null,
+    "format": "pdf",
+    "size": 205203,
+    "totalPages": 87,
+    "totalSections": 1,
+    "totalChunks": 870,
+    "wordCount": 21054,
+    "currentSection": 0,
+    "currentChunk": 0,
+    "importStatus": "done",
+    "importStage": "done",
+    "importProgress": 100,
+    "importedUntil": 87,
+    "hasCover": false,
+    "rate": 1,
+    "voiceURI": "Eddy (español (España))",
+    "createdAt": 1789779356380,
+    "updatedAt": 1789779356700,
+    "lastOpenedAt": 1789779356380,
+    "fingerprint": "205203:8339f0547bfdfd266df0e30150b69b79f5282ec65138f9f66f99b83212295945",
+    "emptyPages": 0,
+    "damagedPages": 0
+  },
+  "errors": []
+}

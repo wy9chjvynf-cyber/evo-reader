@@ -11,6 +11,7 @@ const CAP_BUILD = process.env.CAP_BUILD === "1";
 
 export default defineConfig({
   base,
+  worker: { format: "es", rollupOptions: { output: { entryFileNames: "assets/pdf.worker-[hash].mjs" } } },
   build: {
     // Conservative baseline so esbuild transpiles any newer syntax that
     // older/partial iOS WebKit builds don't support, instead of shipping it as-is.

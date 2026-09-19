@@ -1,19 +1,21 @@
-const {chromium}=require(process.env.PLAYWRIGHT_PATH || 'playwright');
+const {chromium,webkit}=require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const {fixture,state}=require('./stress-pdf.cjs');
 (async()=>{
-const browser=await chromium.launch({headless:true,channel:'chrome'});
+const browser=await (process.env.EVO_WEBKIT?webkit:chromium).launch({headless:true,...(process.env.EVO_WEBKIT?(process.env.EVO_WEBKIT_EXECUTABLE?{executablePath:process.env.EVO_WEBKIT_EXECUTABLE}:{}):{channel:'chrome'})});
 try {
 const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
 await page.goto(process.env.EVO_URL||'http://127.0.0.1:4177');
 await page.getByRole('button',{name:'Importar libro',exact:true}).waitFor();
 await page.evaluate(()=>navigator.serviceWorker.ready);await page.reload();await page.waitForFunction(()=>!!navigator.serviceWorker.controller);
-await page.context().setOffline(true);
+if(!process.env.EVO_WEBKIT && !process.env.EVO_KEEP_ONLINE) await page.context().setOffline(true);
 const file=fixture(2101,1024);
-await page.locator('input[type=file]').first().setInputFiles(file);
-let b;const initial=Date.now();while(!(b=(await state(page))[0])||b.importedUntil<80) { assert(Date.now()-initial<30000,JSON.stringify(b)); assert.notEqual(b?.importStatus,'error',JSON.stringify(b)); await page.waitForTimeout(20); }
+await page.waitForFunction(()=>document.querySelector('input[type=file]') && !document.querySelector('input[type=file]').disabled);
+await page.locator('input[type=file]').first().setInputFiles(process.env.EVO_WEBKIT ? {name:require('node:path').basename(file),mimeType:'application/pdf',buffer:fs.readFileSync(file)} : file);
+let b;const initial=Date.now();while(!(b=(await state(page))[0])||b.importedUntil<80) { assert(Date.now()-initial<30000,JSON.stringify({book:b,errors,ui:await page.locator("body").innerText()})); assert.notEqual(b?.importStatus,'error',JSON.stringify(b)); await page.waitForTimeout(20); }
 assert.equal(b.importStatus,'importing');const before=b.importedUntil;
+if(process.env.EVO_WEBKIT && !process.env.EVO_KEEP_ONLINE) await page.context().setOffline(true);
 await page.reload();
 await page.getByRole('button',{name:'Cancelar importación',exact:true}).waitFor();
 await page.getByRole('button',{name:'Cancelar importación',exact:true}).click();
@@ -29,7 +31,7 @@ assert.equal(content.indices.length,b.totalChunks);assert.deepEqual(content.indi
 await page.reload();await page.getByRole('button',{name:'Siguiente →',exact:true}).waitFor();
 await page.screenshot({path:'artifacts/pdf-offline-recovered.png',fullPage:true});
 assert.deepEqual(errors,[]);
-fs.writeFileSync('artifacts/pdf-recovery.json',JSON.stringify({passed:true,offline:true,pages:2101,reloadCheckpoint:before,cancelCheckpoint:paused,totalChunks:b.totalChunks,checks:['offline PDF import with cached worker','automatic reload recovery','cancel preserves checkpoint','cancel stays paused across reload','manual retry','unique contiguous chunks','all pages persisted','offline reading'],errors},null,2));
-console.log('PDF recovery/offline passed');
+fs.writeFileSync(`artifacts/pdf-recovery${process.env.EVO_WEBKIT?'-webkit':''}.json`,JSON.stringify({passed:true,offline:!process.env.EVO_KEEP_ONLINE,pages:2101,reloadCheckpoint:before,cancelCheckpoint:paused,totalChunks:b.totalChunks,checks:[process.env.EVO_KEEP_ONLINE?'PDF import with saved binary source':'offline PDF with cached worker','automatic reload recovery','cancel preserves checkpoint','cancel stays paused across reload','manual retry','unique contiguous chunks','all pages persisted',process.env.EVO_KEEP_ONLINE?'reading':'offline reading'],errors},null,2));
+console.log('PDF recovery passed; offline='+!process.env.EVO_KEEP_ONLINE);
 } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1)});

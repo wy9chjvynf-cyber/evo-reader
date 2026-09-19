@@ -80,12 +80,14 @@ interface EvoReaderDB extends DBSchema {
   sections: { key: [string, number]; value: SectionRecord };
   chunks: { key: [string, number]; value: ChunkRecord };
   files: { key: string; value: FileBlobRecord };
+  pdfSources: { key: string; value: { bookId: string; size: number; ready: boolean } };
+  pdfSourceParts: { key: [string, number]; value: { bookId: string; index: number; data: ArrayBuffer } };
   covers: { key: string; value: CoverRecord };
   meta: { key: string; value: { key: string; value: unknown } };
 }
 
 const DB_NAME = "evoreader";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise: Promise<IDBPDatabase<EvoReaderDB>> | null = null;
 
@@ -99,6 +101,10 @@ function getDB() {
           db.createObjectStore("chunks", { keyPath: ["bookId", "index"] });
           db.createObjectStore("files", { keyPath: "bookId" });
           db.createObjectStore("meta", { keyPath: "key" });
+        }
+        if (oldVersion < 3) {
+          db.createObjectStore("pdfSources", { keyPath: "bookId" });
+          db.createObjectStore("pdfSourceParts", { keyPath: ["bookId", "index"] });
         }
         if (oldVersion < 2) {
           db.createObjectStore("covers", { keyPath: "bookId" });
@@ -312,7 +318,58 @@ export async function deleteBookChunks(bookId: string): Promise<void> {
 
 export const putFileBlob = (bookId: string, blob: Blob) => safely(async () => (await getDB()).put("files", { bookId, blob }));
 export const getFileBlob = (bookId: string) => safely(async () => (await getDB()).get("files", bookId));
-export const deleteFileBlob = (bookId: string) => safely(async () => (await getDB()).delete("files", bookId));
+export const deleteFileBlob = (bookId: string) => safely(async () => {
+  const db = await getDB();
+  const tx = db.transaction(["files", "pdfSources", "pdfSourceParts"], "readwrite");
+  await tx.objectStore("files").delete(bookId);
+  await tx.objectStore("pdfSources").delete(bookId);
+  await tx.objectStore("pdfSourceParts").delete(IDBKeyRange.bound([bookId, 0], [bookId, Number.MAX_SAFE_INTEGER]));
+  await tx.done;
+});
+
+/** A range source also works when WebKit cannot persist Blob/File values. */
+export interface PdfSource {
+  size: number;
+  slice: (begin: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> };
+}
+const PDF_SOURCE_PART_BYTES = 256 * 1024;
+
+export async function savePdfSource(bookId: string, source: Blob, signal?: AbortSignal) {
+  // Keep the efficient browser Blob path where supported; fall back to fixed
+  // ArrayBuffer records, never a full-file ArrayBuffer or base64 copy.
+  if (await putFileBlob(bookId, source)) return;
+  const db = await getDB();
+  await db.put("pdfSources", { bookId, size: source.size, ready: false });
+  for (let begin = 0; begin < source.size; begin += PDF_SOURCE_PART_BYTES) {
+    if (signal?.aborted) throw new Error("Importación cancelada. Selecciona el archivo para reintentar.");
+    const data = await source.slice(begin, begin + PDF_SOURCE_PART_BYTES).arrayBuffer();
+    await db.put("pdfSourceParts", { bookId, index: begin / PDF_SOURCE_PART_BYTES, data });
+  }
+  await db.put("pdfSources", { bookId, size: source.size, ready: true });
+}
+
+export async function getPdfSource(bookId: string): Promise<PdfSource | undefined> {
+  const stored = await getFileBlob(bookId);
+  if (stored) return stored.blob;
+  const db = await getDB();
+  const descriptor = await db.get("pdfSources", bookId);
+  if (!descriptor?.ready) return undefined;
+  return {
+    size: descriptor.size,
+    slice: (begin, end) => ({ arrayBuffer: async () => {
+      const start = Math.max(0, begin), stop = Math.min(end, descriptor.size);
+      const result = new Uint8Array(Math.max(0, stop - start));
+      for (let index = Math.floor(start / PDF_SOURCE_PART_BYTES); index * PDF_SOURCE_PART_BYTES < stop; index++) {
+        const part = await db.get("pdfSourceParts", [bookId, index]);
+        if (!part) throw new Error("Falta una parte del PDF guardado. Selecciona el archivo de nuevo.");
+        const offset = index * PDF_SOURCE_PART_BYTES;
+        const a = Math.max(start, offset), b = Math.min(stop, offset + part.data.byteLength);
+        result.set(new Uint8Array(part.data, a - offset, b - a), a - start);
+      }
+      return result.buffer;
+    } }),
+  };
+}
 
 // --- covers (small thumbnails, kept permanently) ---
 
@@ -378,14 +435,14 @@ export async function commitPdfPage(bookId: string, chunks: ChunkRecord[], secti
 /** Cursor cleanup never materializes stored PDFs or all book text. Keep resumable sources. */
 export async function cleanupImportOrphans() {
   const db = await getDB();
-  const tx = db.transaction(["books", "files", "chunks", "sections", "covers"], "readwrite");
-  for (const name of ["files", "chunks", "sections", "covers"] as const) {
+  const tx = db.transaction(["books", "files", "pdfSources", "pdfSourceParts", "chunks", "sections", "covers"], "readwrite");
+  for (const name of ["files", "pdfSources", "pdfSourceParts", "chunks", "sections", "covers"] as const) {
     let cursor = await tx.objectStore(name).openKeyCursor();
     while (cursor) {
       const key = cursor.primaryKey;
       const id = Array.isArray(key) ? key[0] as string : key as string;
       const book = await tx.objectStore("books").get(id);
-      if (!book || (name === "files" && book.importStatus === "done")) await tx.objectStore(name).delete(key as never);
+      if (!book || ((name === "files" || name === "pdfSources" || name === "pdfSourceParts") && book.importStatus === "done")) await tx.objectStore(name).delete(key as never);
       cursor = await cursor.continue();
     }
   }

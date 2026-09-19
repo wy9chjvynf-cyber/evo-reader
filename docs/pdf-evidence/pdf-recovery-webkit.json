@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "offline": false,
+  "pages": 2101,
+  "reloadCheckpoint": 82,
+  "cancelCheckpoint": 114,
+  "totalChunks": 21010,
+  "checks": [
+    "PDF import with saved binary source",
+    "automatic reload recovery",
+    "cancel preserves checkpoint",
+    "cancel stays paused across reload",
+    "manual retry",
+    "unique contiguous chunks",
+    "all pages persisted",
+    "reading"
+  ],
+  "errors": []
+}

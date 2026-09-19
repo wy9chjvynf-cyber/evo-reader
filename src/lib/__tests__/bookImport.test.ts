@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const pdfMock = vi.hoisted(() => ({ pages: [] as string[], hangOnce: false, corruptPage: 0 }));
 
-vi.mock("pdfjs-dist", () => ({
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   GlobalWorkerOptions: {},
   PDFDataRangeTransport: class {},
   PDFWorker: class { promise = Promise.resolve(); destroy() {} },
@@ -32,7 +32,7 @@ vi.mock("pdfjs-dist", () => ({
     }),
   }),
 }));
-vi.mock("pdfjs-dist/build/pdf.worker.mjs?url", () => ({ default: "mock-worker.js" }));
+vi.mock("../pdf.worker?worker&url", () => ({ default: "mock-worker.js" }));
 
 const { clearAllBooks, getBook, getChunkRange, getFileBlob, getSections, putBook, putChunksBatch, putFileBlob, putSection } =
   await import("../db");

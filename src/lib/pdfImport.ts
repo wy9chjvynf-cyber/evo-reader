@@ -1,10 +1,13 @@
-import * as pdfjsLib from "pdfjs-dist";
+import "./pdfCompat";
+// Use the compatibility build in BOTH realms: Vite target settings do not
+// polyfill runtime APIs such as Iterator.find or Promise.withResolvers in Safari.
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFPageProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import pdfWorkerUrl from "./pdf.worker?worker&url";
 import { splitIntoChunks } from "./chunk";
 import { findHeadingNearTop } from "./chapterHeuristics";
 import { countWords } from "./sectionBuilder";
-import { commitPdfPage, getBook, type SectionRecord } from "./db";
+import { commitPdfPage, getBook, type SectionRecord, type PdfSource } from "./db";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 export const PDF_LIMITS = { fileBytes: 256 * 1024 * 1024, rangeBytes: 64 * 1024, fetchedBytes: 32 * 1024 * 1024, pageCharacters: 256 * 1024, epochPages: 32, timeoutMs: 30_000 };
@@ -21,9 +24,9 @@ class BlobRanges extends pdfjsLib.PDFDataRangeTransport {
   private stopped = false;
   private queue = Promise.resolve();
   private fetched = 0;
-  private blob: Blob;
+  private blob: PdfSource;
   private fail: (error: Error) => void;
-  constructor(blob: Blob, fail: (error: Error) => void) { super(blob.size, null, true); this.blob = blob; this.fail = fail; }
+  constructor(blob: PdfSource, fail: (error: Error) => void) { super(blob.size, null, true); this.blob = blob; this.fail = fail; }
   requestDataRange(begin: number, end: number) {
     this.queue = this.queue.then(async () => {
       if (this.stopped) return;
@@ -60,7 +63,7 @@ async function pageLines(page: PDFPageProxy): Promise<string[]> {
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
-export async function importPdfIncremental(bookId: string, source: Blob, opts: PdfImportOptions) {
+export async function importPdfIncremental(bookId: string, source: PdfSource, opts: PdfImportOptions) {
   if (source.size > PDF_LIMITS.fileBytes) throw new Error("PDF de más de 256 MB: divide el documento antes de importarlo.");
   let chunkIndex = opts.startChunkIndex, nextSectionIndex = opts.nextSectionIndex;
   const previous = await getBook(bookId);

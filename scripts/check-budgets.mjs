@@ -5,8 +5,9 @@ const js = files.filter(f => f.endsWith('.js'));
 const css = files.filter(f => f.endsWith('.css'));
 const size = async files => (await Promise.all(files.map(async f => gzipSync(await readFile(`dist/assets/${f}`)).length))).reduce((a,b)=>a+b,0);
 const values = { javascriptGzip: await size(js), cssGzip: await size(css) };
-// Legacy importers remain in the main bundle; lower this baseline in Import Engine phase.
-const limits = { javascriptGzip: 360000, cssGzip: 6000 };
+// The PDF.js compatibility build adds ~20 KB gzip for Safari runtime polyfills.
+// Keep that explicit compatibility cost within a 375 KB main-JS ceiling.
+const limits = { javascriptGzip: 375000, cssGzip: 6000 };
 for (const key of Object.keys(limits)) if (values[key] > limits[key]) throw new Error(`${key}: ${values[key]} > ${limits[key]}`);
 const styles=await readFile('src/index.css','utf8');
 if (/https?:\/\//.test(styles)) throw new Error('Remote asset in design system');

@@ -4,6 +4,8 @@ import {
   commitPdfPage,
   getBook,
   getFileBlob,
+  getPdfSource,
+  savePdfSource,
   getMeta,
   getSections,
   putBook,
@@ -163,8 +165,7 @@ async function importWholeDocument(
 
 async function importPdf(book: BookRecord, file: File, callbacks: ImportCallbacks): Promise<BookRecord> {
   await updateBook(book.id, { importStage: "opening" });
-  await putFileBlob(book.id, file);
-  if (!await getFileBlob(book.id)) throw new Error("No se pudo guardar el PDF. Revisa el espacio disponible.");
+  await savePdfSource(book.id, file, activeController?.signal);
 
   await updateBook(book.id, { importStage: "structure" });
   let result;
@@ -313,8 +314,9 @@ async function runResumeCore(book: BookRecord, callbacks: ImportCallbacks = {}):
     return failed ?? book;
   }
 
-  const fileRecord = await getFileBlob(book.id);
-  if (!fileRecord) {
+  const pdfSource = book.format === "pdf" ? await getPdfSource(book.id) : undefined;
+  const fileRecord = book.format === "epub" ? await getFileBlob(book.id) : undefined;
+  if (!fileRecord && !pdfSource) {
     const failed = await updateBook(book.id, {
       importStatus: "error",
       importStage: "extracting",
@@ -338,7 +340,7 @@ async function runResumeCore(book: BookRecord, callbacks: ImportCallbacks = {}):
       // existing ones — reusing the open section's own index here would
       // silently overwrite it instead of creating a new row.
       const nextSectionIndex = sections.length > 0 ? Math.max(...sections.map((s) => s.index)) + 1 : 0;
-      const result = await importPdfIncremental(book.id, fileRecord.blob, {
+      const result = await importPdfIncremental(book.id, pdfSource!, {
         signal: activeController?.signal,
         startPage: book.importedUntil + 1,
         startChunkIndex: book.totalChunks,
@@ -361,7 +363,7 @@ async function runResumeCore(book: BookRecord, callbacks: ImportCallbacks = {}):
       });
       done = await getBook(book.id);
     } else {
-      const result = await importEpubIncremental(book.id, await fileRecord.blob.arrayBuffer(), {
+      const result = await importEpubIncremental(book.id, await fileRecord!.blob.arrayBuffer(), {
         startSpineIndex: book.importedUntil,
         startSectionIndex: book.totalSections,
         startChunkIndex: book.totalChunks,
@@ -444,7 +446,7 @@ export function runImport(file: File, callbacks: ImportCallbacks = {}): Promise<
     if (duplicate) {
       callbacks.onCreated?.(duplicate);
       if (duplicate.importStatus !== "done") {
-        if (!await getFileBlob(duplicate.id)) await putFileBlob(duplicate.id, file);
+        if (!await getPdfSource(duplicate.id)) await savePdfSource(duplicate.id, file, activeController?.signal);
         return runResumeCore(duplicate, callbacks);
       }
       callbacks.onDone?.(duplicate); return duplicate;
